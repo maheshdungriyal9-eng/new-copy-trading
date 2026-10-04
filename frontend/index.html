@@ -1,0 +1,1238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Antigravity Copy Trader</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <!-- CSS Stylesheet -->
+  <link rel="stylesheet" href="style.min.css?v=2.6.4">
+  <!-- TradingView Advanced Chart Widget -->
+  <script src="https://s3.tradingview.com/tv.js"></script>
+  <!-- Firebase App & Auth SDKs -->
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+</head>
+<body>
+
+  <!-- Pull to Refresh Loader Spinner -->
+  <div id="pull-refresh-indicator" class="pull-refresh-indicator">
+    <div class="pull-refresh-circle">
+      <i class="fa-solid fa-arrows-rotate pull-refresh-icon"></i>
+    </div>
+    <span class="pull-refresh-text">Swipe down to refresh</span>
+  </div>
+
+  <!-- Mock SMS Toast Notification -->
+  <div id="sms-toast" class="sms-toast hidden">
+    <div class="sms-toast-header">
+      <div class="sms-toast-app">
+        <i class="fa-solid fa-message sms-icon"></i>
+        <span>MESSAGES</span>
+      </div>
+      <span class="sms-toast-time">now</span>
+    </div>
+    <div class="sms-toast-body">
+      <span class="sms-sender">Antigravity Auth</span>
+      <p class="sms-message">Your OTP code for Copy Trader is <strong id="sms-otp-code">------</strong>. Valid for 5 minutes.</p>
+    </div>
+    <div class="sms-toast-actions">
+      <button class="sms-btn sms-btn-autofill" id="btn-sms-autofill" onclick="triggerAutoOTPDetect()">
+        <i class="fa-solid fa-wand-magic-sparkles"></i> Auto-Detect & Fill
+      </button>
+      <button class="sms-btn sms-btn-dismiss" onclick="dismissSMSToast()">Dismiss</button>
+    </div>
+  </div>
+
+  <!-- Authentication Portal Overlay -->
+  <div id="auth-screen" class="auth-screen">
+    <div class="auth-card">
+      <div class="auth-header">
+        <i class="fa-solid fa-circle-nodes auth-logo-icon"></i>
+        <h2>ANTIGRAVITY <span>COPY TRADER</span></h2>
+        <p>Premium Copy Trading System</p>
+      </div>
+
+      <!-- Google Flow Section -->
+      <div class="auth-flow-section" id="auth-google-section">
+        <div class="google-auth-button-wrapper" style="padding: 20px 0; text-align: center;">
+          <button class="btn btn-google-login" onclick="handleGoogleLogin()">
+            <i class="fa-brands fa-google google-icon"></i>
+            <span>Continue with Google</span>
+          </button>
+        </div>
+        <p class="google-disclaimer">By continuing, you agree to enable automated secure copy trading linkages.</p>
+      </div>
+    </div>
+  </div>
+    </div>
+  </div>
+
+  <!-- Background Blur Elements -->
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header" id="app-header">
+      <div class="logo" id="header-logo">
+        <i class="fa-solid fa-circle-nodes logo-icon"></i>
+        <h1>ANTIGRAVITY <span>COPY TRADER</span></h1>
+      </div>
+      <div class="system-status" id="header-status">
+        <span class="status-indicator online"></span>
+        <span class="status-text">Engine Online</span>
+      </div>
+      <!-- Relocated Search Bar Portal on Mobile Watchlist -->
+      <div id="header-mobile-search-portal" class="hidden" style="width: 100%;"></div>
+    </header>
+
+    <!-- Main Workspace Layout -->
+    <div class="workspace">
+      
+      <!-- Sidebar Navigation -->
+      <aside class="sidebar">
+        <nav class="nav-menu">
+          <button class="nav-btn active" data-tab="overview">
+            <i class="fa-solid fa-chart-line"></i> Dashboard
+          </button>
+          <button class="nav-btn" data-tab="accounts">
+            <i class="fa-solid fa-users-gear"></i> Accounts
+          </button>
+          <button class="nav-btn" data-tab="mappings">
+            <i class="fa-solid fa-link"></i> Mappings
+          </button>
+          <button class="nav-btn" data-tab="simulator">
+            <i class="fa-solid fa-play"></i> Execution Simulator
+          </button>
+          <button class="nav-btn" data-tab="portfolio">
+            <i class="fa-solid fa-briefcase"></i> Demat Portfolio
+          </button>
+        </nav>
+        <div class="sidebar-user-info" id="sidebar-user-display" style="padding: 0 16px; margin-bottom: 12px; font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--border-color); padding-top: 12px;">
+          <span id="user-display-name" style="font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 110px;">Guest</span>
+          <button onclick="handleLogout()" style="background: transparent; border: none; color: var(--red); font-size: 11px; cursor: pointer; font-weight: 600; padding: 2px 4px; display: flex; align-items: center; gap: 4px; display: none !important;"><i class="fa-solid fa-power-off"></i> Logout</button>
+        </div>
+        <div class="sidebar-footer">
+          <p>Local Server running on</p>
+          <a href="http://localhost:3000" target="_blank">http://localhost:3000</a>
+        </div>
+      </aside>
+
+      <!-- Main Content Area -->
+      <main class="content-area">
+        
+        <!-- ================= OVERVIEW TAB ================= -->
+        <section id="tab-overview" class="tab-content active">
+          <div class="overview-grid">
+            
+            <!-- Statistics Cards -->
+            <div class="card stat-card">
+              <div class="stat-icon purple"><i class="fa-solid fa-user-tie"></i></div>
+              <div class="stat-info">
+                <h3>Total Accounts</h3>
+                <span id="stat-masters">0</span>
+              </div>
+            </div>
+            
+            <div class="card stat-card">
+              <div class="stat-icon blue"><i class="fa-solid fa-users"></i></div>
+              <div class="stat-info">
+                <h3>Connected Accounts</h3>
+                <span id="stat-children">0</span>
+              </div>
+            </div>
+
+            <div class="card stat-card">
+              <div class="stat-icon green"><i class="fa-solid fa-circle-check"></i></div>
+              <div class="stat-info">
+                <h3>Active Linkages</h3>
+                <span id="stat-linkages">0</span>
+              </div>
+            </div>
+
+            <div class="card stat-card">
+              <div class="stat-icon cyan"><i class="fa-solid fa-copy"></i></div>
+              <div class="stat-info">
+                <h3>Copied Trades</h3>
+                <span id="stat-copied-trades">0</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="dashboard-layout-grid">
+
+
+
+            <!-- Watchlist Card (Dedicated Column) -->
+            <div id="desktop-watchlist-container">
+              <div class="card" id="watchlist-card" style="padding: 16px;">
+                <!-- Fixed Indices Header -->
+                <div class="wl-index-header">
+                  <div class="index-widget">
+                    <div class="index-name-row">
+                      <span class="index-name">NIFTY</span>
+                      <span class="index-expiry">Expiry Tue</span>
+                    </div>
+                    <div class="index-price-row">
+                      <span class="index-ltp text-green" id="index-nifty-ltp">23,622.90</span>
+                      <span class="index-change text-green" id="index-nifty-change">+461.30 (+1.99%)</span>
+                    </div>
+                  </div>
+                  <div class="index-widget">
+                    <div class="index-name-row">
+                      <span class="index-name">SENSEX</span>
+                      <span class="index-expiry">Expiry Thu</span>
+                    </div>
+                    <div class="index-price-row">
+                      <span class="index-ltp text-green" id="index-sensex-ltp">75,527.95</span>
+                      <span class="index-change text-green" id="index-sensex-change">+1,695.40 (+2.30%)</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Search container -->
+                <div id="watchlist-search-desktop-placeholder" style="margin-top: 12px;">
+                  <div class="search-container" id="watchlist-search-container" style="position:relative; margin-bottom: 12px; display: flex; flex-direction: column; align-items: center; width: 100%; gap: 8px;">
+                    <div class="search-input-wrapper" style="position: relative; width: 100%;">
+                      <i class="fa-solid fa-magnifying-glass search-icon" id="watchlist-search-icon" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: 14px; z-index: 10; cursor: pointer;"></i>
+                      <input type="text" id="watchlist-search" autocomplete="off" placeholder="Search..." style="padding: 10px 36px 10px 36px; font-size: 14px; width: 100%; margin-bottom: 0; background:rgba(0,0,0,0.25); border:1px solid var(--border-color); border-radius:10px; color:#fff; outline: none; box-sizing: border-box; z-index: 1;">
+                      <i class="fa-solid fa-xmark search-clear-icon hidden" id="watchlist-search-clear" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: 14px; cursor: pointer; z-index: 10;"></i>
+                    </div>
+                    <!-- Search Filter Bar (hidden by default, shown in search-active) -->
+                    <div class="search-filter-bar hidden" id="search-filter-bar" style="width: 100%;">
+                      <button class="search-filter-tab active" data-filter="all">All</button>
+                      <button class="search-filter-tab" data-filter="stock">Stock</button>
+                      <button class="search-filter-tab" data-filter="fo">F&O</button>
+                      <button class="search-filter-tab" data-filter="commodity">Commodity</button>
+                    </div>
+                    <div id="watchlist-suggestions" class="autocomplete-suggestions hidden"></div>
+                  </div>
+                </div>
+
+                <div class="wl-tabs-row" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 12px; margin-bottom: 12px;">
+                  <div class="wl-tabs-list" style="display: flex; gap: 24px; align-items: center;">
+                    <span class="wl-tab active" onclick="switchWatchlistTab(1)" style="font-size: 14px; font-weight: 600; cursor: pointer;">1</span>
+                    <span class="wl-tab" onclick="switchWatchlistTab(2)" style="font-size: 14px; font-weight: 600; cursor: pointer;">2</span>
+                  </div>
+                  <button class="wl-tab-add-btn" style="background: transparent; border: none; color: #fff; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-circle-plus"></i></button>
+                </div>
+
+                <!-- Symbol & LTP Header -->
+                <div class="wl-table-header" style="display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; padding: 4px 14px; border-bottom: 1px solid rgba(255,255,255,0.05); margin-bottom: 8px;">
+                  <span>Symbol</span>
+                  <span>LTP</span>
+                </div>
+
+                <!-- Watchlist List -->
+                <div class="watchlist-list" id="watchlist-items">
+                  <!-- Dynamically populated stock rows -->
+                </div>
+
+                <!-- Watchlist Footer Action Pills -->
+                <div class="wl-footer-actions">
+                  <button class="wl-footer-btn" onclick="switchTab('orders')">Open Orders</button>
+                  <button class="wl-footer-btn" onclick="switchTab('portfolio')">Positions</button>
+                  <button class="wl-footer-more-btn"><i class="fa-solid fa-ellipsis-vertical"></i></button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Connection & Market Status Column -->
+            <div class="status-widgets-column">
+              <!-- Quick Account Status List -->
+              <div class="card">
+                <div class="card-header">
+                  <h2><i class="fa-solid fa-signal"></i> Connection Status</h2>
+                </div>
+                <div class="account-status-list" id="quick-status-list">
+                  <!-- Dynamically Rendered -->
+                </div>
+              </div>
+
+              <!-- Market Status Card -->
+              <div class="card">
+                <div class="card-header">
+                  <h2><i class="fa-solid fa-clock"></i> Market Status</h2>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 12px; font-size: 14px; color: var(--text-secondary);">
+                  <div class="account-details-row" style="display:flex; justify-content:space-between;">
+                    <span>NSE Cash Session:</span>
+                    <span id="market-status-badge" class="text-green" style="font-weight: 600;">OPEN (Simulated)</span>
+                  </div>
+                  <div class="account-details-row" style="display:flex; justify-content:space-between;">
+                    <span>Last Price Tick:</span>
+                    <span id="watchlist-last-tick" style="color: var(--text-primary); font-family: var(--font-mono);">--</span>
+                  </div>
+                  <div style="border-top: 1px solid var(--border-color); padding-top: 12px; font-size: 12px; color: var(--text-muted); line-height: 1.4;">
+                    Watchlist prices fluctuate automatically. Click on "Add" to track other custom stock symbols.
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= ACCOUNTS TAB ================= -->
+        <section id="tab-accounts" class="tab-content">
+          <div class="section-actions">
+            <div style="display: flex; flex-direction: column; gap: 4px;">
+              <h2>Manage Trading Accounts</h2>
+              <span id="account-user-badge" style="font-size: 12px; color: var(--text-secondary);">Logged in as: Guest</span>
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center;">
+              <button class="btn btn-secondary" onclick="handleLogout()" style="border: 1px solid var(--red); color: var(--red); padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; background: transparent; display: none !important;">
+                <i class="fa-solid fa-power-off"></i> Log Out
+              </button>
+              <button class="btn btn-primary" id="btn-show-add-account">
+                <i class="fa-solid fa-plus"></i> Add Account
+              </button>
+            </div>
+          </div>
+
+          <!-- Add/Edit Account Modal/Form -->
+          <div class="card form-card hidden" id="account-form-container">
+            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+              <h2 id="form-title">Add New Trading Account</h2>
+              <button class="btn-close" id="btn-cancel-account"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <form id="account-form" class="grid-form">
+              <input type="hidden" id="acc-id">
+              
+              <div class="form-group hidden">
+                <label for="acc-name">Account Label / Name (Optional)</label>
+                <input type="text" id="acc-name" placeholder="Leave blank to sync from Demat profile">
+              </div>
+
+              <div class="form-group hidden">
+                <label for="acc-role">Account Role</label>
+                <select id="acc-role">
+                  <option value="child" selected>Child (Replicating Account)</option>
+                  <option value="master">Master (Source Account)</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="acc-broker">Broker API Integration</label>
+                <select id="acc-broker" required>
+                  <option value="angel_one">Angel One (SmartAPI)</option>
+                  <option value="motilal">Motilal Oswal (MOFSL OpenAPI)</option>
+                  <option value="dhan">Dhan (DhanHQ API)</option>
+                </select>
+              </div>
+
+              <div class="form-group colspan-2" style="margin-bottom: 12px; display: flex; gap: 20px; align-items: center;">
+                <label style="display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; color: var(--text-primary); margin-bottom: 0;">
+                  <input type="checkbox" id="acc-is-simulated" style="width: 18px; height: 18px; cursor: pointer;">
+                  Paper Trading / Simulated Account
+                </label>
+              </div>
+
+              <div class="form-group colspan-2 hidden" id="sim-balance-group">
+                <label for="acc-sim-balance">Initial Virtual Balance (₹)</label>
+                <input type="number" id="acc-sim-balance" value="1000000" placeholder="e.g. 1000000">
+              </div>
+
+              <div id="live-credentials-fields" style="display: contents;">
+                <!-- Angel One Specific Fields -->
+                <div class="broker-fields angel_one-fields">
+                  <div class="form-group">
+                    <label for="acc-clientcode">Angel One Client Code</label>
+                    <input type="text" id="acc-clientcode" placeholder="e.g. A12345" oninput="this.value = this.value.toUpperCase()">
+                  </div>
+                  <div class="form-group">
+                    <label for="acc-password-ao">Client MPIN / Password</label>
+                    <input type="password" id="acc-password-ao" placeholder="Enter PIN">
+                  </div>
+                </div>
+
+                <!-- Motilal Specific Fields -->
+                <div class="broker-fields motilal-fields hidden">
+                  <div class="form-group">
+                    <label for="acc-userid">Motilal User ID</label>
+                    <input type="text" id="acc-userid" placeholder="e.g. MO9999" oninput="this.value = this.value.toUpperCase()">
+                  </div>
+                  <div class="form-group">
+                    <label for="acc-password-mo">Trading Password</label>
+                    <input type="password" id="acc-password-mo" placeholder="Enter password">
+                  </div>
+                  <div class="form-group">
+                    <label for="acc-2fa">2FA Security Value (e.g. DOB DD/MM/YYYY or PAN)</label>
+                    <input type="text" id="acc-2fa" placeholder="e.g. 15/08/1990 or PAN" oninput="this.value = this.value.toUpperCase()">
+                  </div>
+                  <div class="form-group">
+                    <label for="acc-apisecret">API Secret Key</label>
+                    <input type="password" id="acc-apisecret" placeholder="Enter API Secret key">
+                  </div>
+                </div>
+
+                <!-- Dhan Specific Fields -->
+                <div class="broker-fields dhan-fields hidden">
+                  <div class="form-group">
+                    <label for="acc-dhan-clientid">Dhan Client ID</label>
+                    <input type="text" id="acc-dhan-clientid" placeholder="e.g. 1000000001">
+                  </div>
+                  <div class="form-group">
+                    <label for="acc-dhan-accesstoken">Dhan PIN / Access Token</label>
+                    <input type="password" id="acc-dhan-accesstoken" placeholder="Enter 6-digit PIN or static Access Token">
+                  </div>
+                </div>
+
+                <!-- Shared API Fields -->
+                <div class="form-group colspan-2">
+                  <div class="form-row">
+                    <div class="form-group flex-1">
+                      <label for="acc-apikey">API Key</label>
+                      <input type="text" id="acc-apikey" placeholder="Enter developer App API key">
+                    </div>
+                    <div class="form-group flex-1">
+                      <label for="acc-totpsecret">TOTP Secret (Base32 Key for Auto-Login)</label>
+                      <input type="text" id="acc-totpsecret" placeholder="e.g. JBSWY3DPEHPK3PXP">
+                    </div>
+                  </div>
+                </div>
+
+                <div class="form-group colspan-2" style="margin-bottom: 12px;">
+                  <label style="font-weight: 600; margin-bottom: 8px; display: block;">Connection Routing IP</label>
+                  <div style="display: flex; gap: 20px; align-items: center; margin-bottom: 8px; flex-wrap: wrap;">
+                    <label style="display: flex; align-items: center; gap: 6px; font-weight: normal; cursor: pointer; color: var(--text-primary);">
+                      <input type="radio" name="conn-route-type" value="direct" checked style="cursor: pointer;">
+                      Direct (Uses Host/Local IP)
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 6px; font-weight: normal; cursor: pointer; color: var(--text-primary);">
+                      <input type="radio" name="conn-route-type" value="vps" style="cursor: pointer;">
+                      VPS Static IP (34.93.162.96)
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 6px; font-weight: normal; cursor: pointer; color: var(--text-primary);">
+                      <input type="radio" name="conn-route-type" value="custom" style="cursor: pointer;">
+                      Custom Proxy
+                    </label>
+                  </div>
+                  <input type="text" id="acc-proxyurl" placeholder="e.g. http://username:password@ip:port" style="display: none; width: 100%; margin-top: 8px;">
+                </div>
+              </div>
+
+              <div class="form-actions colspan-2">
+                <button type="button" class="btn btn-secondary" id="btn-discard-account">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save Account</button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Accounts Cards Grid -->
+          <div class="accounts-grid" id="accounts-list">
+            <!-- Dynamically Rendered -->
+          </div>
+
+
+        </section>
+
+        <!-- ================= MAPPINGS TAB ================= -->
+        <section id="tab-mappings" class="tab-content">
+          <div class="section-actions">
+            <h2>Configure Copy Settings</h2>
+            <button class="btn btn-primary" id="btn-save-mappings">
+              <i class="fa-solid fa-save"></i> Save Changes
+            </button>
+          </div>
+
+          <div id="desktop-mappings-container">
+            <div class="card" id="mappings-card">
+              <div class="card-header">
+                <h2><i class="fa-solid fa-network-wired"></i> Master-Child Account Mappings</h2>
+                <span class="subtitle">Specify execution multipliers and link accounts</span>
+              </div>
+              
+              <div class="table-container">
+                <table class="data-table" id="mappings-table">
+                  <thead>
+                    <tr>
+                      <th>Link Master Account</th>
+                      <th>Replicate in Child Account</th>
+                      <th>Quantity Multiplier</th>
+                      <th>Status</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="mappings-list">
+                    <!-- Dynamically Rendered -->
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="table-actions">
+                <button class="btn btn-secondary" id="btn-add-mapping-row">
+                  <i class="fa-solid fa-plus"></i> Add Mapping Row
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= SIMULATOR TAB ================= -->
+        <section id="tab-simulator" class="tab-content">
+          <h2>Order Execution Simulator</h2>
+          
+          <div class="simulator-layout">
+            <!-- Trade Entry Panel -->
+            <div class="card">
+              <div class="card-header">
+                <h2><i class="fa-solid fa-keyboard"></i> Place Order on Master</h2>
+                <span class="subtitle">Simulate Master trade to trigger automated child execution</span>
+              </div>
+              
+              <form id="simulator-form" class="compact-form">
+                <div class="form-group">
+                  <label for="sim-master">Select Master Account</label>
+                  <select id="sim-master" required>
+                    <!-- Dynamically Loaded -->
+                  </select>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group flex-1">
+                    <label for="sim-exchange">Exchange</label>
+                    <select id="sim-exchange" required>
+                      <option value="NSE">NSE (Equity)</option>
+                      <option value="BSE">BSE (Equity)</option>
+                      <option value="NSEFO">NSEFO (F&O)</option>
+                    </select>
+                  </div>
+                  <div class="form-group flex-2">
+                    <label for="sim-symbol">Trading Symbol</label>
+                    <input type="text" id="sim-symbol" placeholder="e.g. INFY-EQ" value="INFY-EQ" required>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group flex-1">
+                    <label for="sim-token">Symbol Token ID</label>
+                    <input type="number" id="sim-token" placeholder="e.g. 1660" value="1660" required>
+                  </div>
+                  <div class="form-group flex-1">
+                    <label for="sim-product">Product Type</label>
+                    <select id="sim-product" required>
+                      <option value="INTRADAY">Intraday (MIS)</option>
+                      <option value="DELIVERY">Delivery (CNC)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group flex-1">
+                    <label for="sim-side">Action</label>
+                    <div class="radio-toggle">
+                      <input type="radio" id="side-buy" name="sim-side" value="BUY" checked>
+                      <label for="side-buy" class="buy-label">BUY</label>
+                      
+                      <input type="radio" id="side-sell" name="sim-side" value="SELL">
+                      <label for="side-sell" class="sell-label">SELL</label>
+                    </div>
+                  </div>
+                  <div class="form-group flex-1">
+                    <label for="sim-qty">Quantity</label>
+                    <input type="number" id="sim-qty" min="1" value="10" required>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group flex-1">
+                    <label for="sim-type">Order Type</label>
+                    <select id="sim-type" required>
+                      <option value="MARKET">Market Order</option>
+                      <option value="LIMIT">Limit Order</option>
+                    </select>
+                  </div>
+                  <div class="form-group flex-1" id="sim-price-group">
+                    <label for="sim-price">Price (₹)</label>
+                    <input type="number" id="sim-price" step="0.05" value="1420.50">
+                  </div>
+                </div>
+
+                <button type="submit" class="btn btn-primary btn-block" id="btn-execute-simulation">
+                  <i class="fa-solid fa-paper-plane"></i> Execute Order & Copy
+                </button>
+              </form>
+            </div>
+
+            <!-- Real-time Console Log Card -->
+            <div class="card double-width flex-column">
+              <div class="card-header flex-row justify-between align-center">
+                <h2><i class="fa-solid fa-terminal"></i> API Audit Console</h2>
+                <div class="console-actions">
+                  <button class="btn btn-icon" id="btn-clear-logs" title="Clear console">
+                    <i class="fa-solid fa-trash-can"></i>
+                  </button>
+                </div>
+              </div>
+              <div class="console-output" id="console-logs">
+                <!-- Dynamically filled logs stream -->
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= PORTFOLIO TAB ================= -->
+        <section id="tab-portfolio" class="tab-content">
+          <div class="section-actions">
+            <h2>Demat Holdings Portfolio</h2>
+            <div class="portfolio-account-select">
+              <label for="portfolio-account">Selected Account:</label>
+              <select id="portfolio-account" class="dropdown-accent">
+                <!-- Dynamically Loaded -->
+              </select>
+            </div>
+          </div>
+
+          <!-- Account Funds overview -->
+          <div class="overview-grid" id="portfolio-funds-grid">
+            <div class="card stat-card small">
+              <div class="stat-info">
+                <h3>Available Cash</h3>
+                <span id="fund-cash">₹ 0.00</span>
+              </div>
+            </div>
+            <div class="card stat-card small">
+              <div class="stat-info">
+                <h3>Utilized Margin</h3>
+                <span id="fund-utilized">₹ 0.00</span>
+              </div>
+            </div>
+            <div class="card stat-card small">
+              <div class="stat-info">
+                <h3>Total Limit</h3>
+                <span id="fund-total">₹ 0.00</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Positions & Holdings Tables -->
+          <div class="portfolio-tables">
+            <!-- Desktop Positions Card Container -->
+            <div id="desktop-positions-container" class="hidden">
+              <!-- Positions Card -->
+              <div class="card" id="positions-card">
+                <div class="card-header">
+                  <h2><i class="fa-solid fa-business-time"></i> Active Open Positions</h2>
+                </div>
+                <div class="table-container">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>Symbol</th>
+                        <th>Exchange</th>
+                        <th>Net Qty</th>
+                        <th>Avg Buy Price</th>
+                        <th>LTP</th>
+                        <th>Unrealized P&L</th>
+                      </tr>
+                    </thead>
+                    <tbody id="portfolio-positions-list">
+                      <!-- Dynamically Loaded -->
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- Desktop Holdings Card Container -->
+            <div id="desktop-holdings-container">
+              <!-- Holdings Card -->
+              <div class="card">
+              <div class="card-header">
+                <h2><i class="fa-solid fa-vault"></i> Demat Holdings Portfolio</h2>
+              </div>
+              <div class="table-container">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Symbol</th>
+                      <th>Exchange</th>
+                      <th>Total Quantity</th>
+                      <th>Average Price</th>
+                      <th>LTP</th>
+                      <th>Total Value</th>
+                      <th>Overall P&L</th>
+                    </tr>
+                  </thead>
+                  <tbody id="portfolio-holdings-list">
+                    <!-- Dynamically Loaded -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            </div>
+
+            <!-- Pending Orders Card -->
+            <div id="desktop-pending-container" class="hidden">
+              <div class="card" id="pending-orders-card">
+                <div class="card-header">
+                  <h2><i class="fa-solid fa-hourglass-half"></i> Pending Orders</h2>
+                </div>
+                <div class="table-container">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>Order ID</th>
+                        <th>Symbol</th>
+                        <th>Exchange</th>
+                        <th>Action</th>
+                        <th>Order Type</th>
+                        <th>Product</th>
+                        <th>Qty</th>
+                        <th>Limit Price</th>
+                        <th>Status</th>
+                        <th style="width: 100px; text-align: center;">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="portfolio-pending-list">
+                      <!-- Dynamically Loaded -->
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- Executed Orders Card -->
+            <div id="desktop-executed-container" class="hidden">
+              <div class="card" id="executed-orders-card">
+                <div class="card-header">
+                  <h2><i class="fa-solid fa-circle-check"></i> Executed Order History</h2>
+                </div>
+                <div class="table-container">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>Order ID</th>
+                        <th>Symbol</th>
+                        <th>Exchange</th>
+                        <th>Action</th>
+                        <th>Order Type</th>
+                        <th>Product</th>
+                        <th>Qty</th>
+                        <th>Price</th>
+                        <th>Status</th>
+                        <th>Time</th>
+                      </tr>
+                    </thead>
+                    <tbody id="portfolio-history-list">
+                      <!-- Dynamically Loaded -->
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Mobile Portals for Portfolio Tab -->
+          <div id="mobile-portfolio-portal-container" class="hidden">
+            <div id="mobile-portfolio-holdings-portal" style="margin-top: 16px;"></div>
+          </div>
+        </section>
+
+        <!-- ================= MOBILE WATCHLIST TAB ================= -->
+        <section id="tab-watchlist" class="tab-content">
+          <div id="mobile-watchlist-container"></div>
+        </section>
+
+        <!-- ================= MOBILE ORDERS TAB ================= -->
+        <section id="tab-orders" class="tab-content">
+          <!-- Main Toggle Header: Orders vs Positions -->
+          <div class="orders-main-toggle-header" style="margin-bottom: 8px;">
+            <span class="orders-toggle-tab active" id="orders-toggle-orders" onclick="setOrdersMainTab('orders')">Orders</span>
+            <span class="orders-toggle-tab" id="orders-toggle-positions" onclick="setOrdersMainTab('positions')">Positions</span>
+          </div>
+
+          <!-- Account selector row -->
+          <div class="orders-account-select-row" id="orders-account-select-container" style="padding: 0 8px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+            <span style="font-size: 13px; color: var(--text-secondary); font-weight: 500;">Select Account:</span>
+            <select id="orders-account-select" class="dropdown-accent" style="background: rgba(0, 0, 0, 0.25); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 12px; border-radius: 8px; font-size: 13px; outline: none; width: 65%;">
+              <!-- Loaded Dynamically -->
+            </select>
+          </div>
+
+          <!-- Sub-tabs for Orders: Pending, Executed, Rejected, Cancelled -->
+          <div class="orders-sub-toggle-header" id="orders-sub-toggle-bar" style="margin-bottom: 12px;">
+            <button class="orders-sub-btn active" id="orders-sub-pending" onclick="setOrdersSubTab('pending')">Pending</button>
+            <button class="orders-sub-btn" id="orders-sub-executed" onclick="setOrdersSubTab('executed')">Executed</button>
+            <button class="orders-sub-btn" id="orders-sub-rejected" onclick="setOrdersSubTab('rejected')">Rejected</button>
+            <button class="orders-sub-btn" id="orders-sub-cancelled" onclick="setOrdersSubTab('cancelled')">Cancelled</button>
+          </div>
+
+          <!-- Content Containers -->
+          <div id="mobile-orders-container" style="flex: 1; display: flex; flex-direction: column; min-height: 0; margin-top: 0; padding: 0 4px; overflow: hidden;">
+            <!-- Horizontal Slider -->
+            <div id="mobile-orders-positions-slider" style="display: flex; flex-direction: row; width: 200%; height: 100%; transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1); min-height: 0; flex-shrink: 0; will-change: transform;">
+              <!-- Mobile Orders List (beautiful card layout) -->
+              <div id="mobile-orders-list" class="mobile-orders-list" style="width: 50%; flex-shrink: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-bottom: 20px; box-sizing: border-box; height: 100%;">
+                <!-- Cards Loaded Dynamically -->
+              </div>
+              <!-- Positions list portal -->
+              <div id="mobile-positions-container" style="width: 50%; flex-shrink: 0; display: flex; flex-direction: column; height: 100%; min-height: 0; box-sizing: border-box;"></div>
+            </div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- Mobile Bottom Navigation Bar -->
+  <nav class="mobile-bottom-nav">
+    <button class="mobile-nav-btn active" data-tab="overview">
+      <i class="fa-solid fa-house"></i>
+      <span>HOME</span>
+    </button>
+    <button class="mobile-nav-btn" data-tab="watchlist">
+      <i class="fa-regular fa-star"></i>
+      <span>WATCHLIST</span>
+    </button>
+    <button class="mobile-nav-btn" data-tab="portfolio">
+      <i class="fa-regular fa-folder-closed"></i>
+      <span>PORTFOLIO</span>
+    </button>
+    <button class="mobile-nav-btn" data-tab="orders">
+      <i class="fa-regular fa-clipboard"></i>
+      <span>ORDERS</span>
+    </button>
+    <button class="mobile-nav-btn" data-tab="accounts">
+      <i class="fa-solid fa-wallet"></i>
+      <span>ACCOUNT</span>
+    </button>
+  </nav>
+
+  <!-- Stock Details & Market Depth Bottom Sheet / Modal -->
+  <div id="stock-details-modal" class="bottom-sheet-modal hidden">
+    <div class="bottom-sheet-overlay" onclick="closeStockDetails()"></div>
+    <div class="bottom-sheet-content">
+      <div class="bottom-sheet-drag-handle"></div>
+      <div class="bottom-sheet-header">
+        <div class="bs-title-block">
+          <h2 id="bs-symbol">AXISBANK</h2>
+          <span id="bs-company" class="subtitle">Axis Bank Limited • NSE</span>
+        </div>
+        <div class="bs-price-block">
+          <div id="bs-price">₹1356.30</div>
+          <div id="bs-change" class="text-green">+39.00 (+2.96%)</div>
+        </div>
+      </div>
+
+      <!-- Stats Row (Open, High, Low, Prev Close) -->
+      <div class="bs-stats-row">
+        <div class="bs-stat">
+          <span class="label">Open</span>
+          <span class="value" id="bs-stat-open">1332.00</span>
+        </div>
+        <div class="bs-stat">
+          <span class="label">High</span>
+          <span class="value" id="bs-stat-high">1358.50</span>
+        </div>
+        <div class="bs-stat">
+          <span class="label">Low</span>
+          <span class="value" id="bs-stat-low">1318.50</span>
+        </div>
+        <div class="bs-stat">
+          <span class="label">Prev. Close</span>
+          <span class="value" id="bs-stat-close">1317.30</span>
+        </div>
+      </div>
+
+      <!-- Market Depth (Bids & Asks) -->
+      <div class="bs-depth-section">
+        <div class="depth-table-header">
+          <span>Qty</span>
+          <span>Buy Price</span>
+          <span>Sell Price</span>
+          <span>Qty</span>
+        </div>
+        <div class="depth-rows" id="bs-depth-rows">
+          <!-- Dynamically populated bids/asks -->
+        </div>
+        <div class="depth-total-row">
+          <span id="bs-depth-total-buy">0</span>
+          <span>Total Quantity</span>
+          <span id="bs-depth-total-sell">0</span>
+        </div>
+      </div>
+
+      <!-- Option Chain & Charts Buttons -->
+      <div class="bs-tool-buttons" style="display: flex; gap: 8px; margin-bottom: 12px;">
+        <button class="btn btn-secondary" id="bs-btn-star" onclick="toggleWatchlistStar()" style="padding: 12px 14px; font-size: 15px; display: flex; align-items: center; justify-content: center;">
+          <i class="fa-regular fa-star"></i>
+        </button>
+        <button class="btn btn-secondary flex-1" onclick="openOptionChain(currentSelectedStock.symbol)" style="display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 13px; font-weight: 600; padding: 12px 6px;">
+          <i class="fa-solid fa-link"></i> Option Chain
+        </button>
+        <button class="btn btn-secondary flex-1" onclick="openTradingViewChart(currentSelectedStock.symbol)" style="display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 13px; font-weight: 600; padding: 12px 6px;">
+          <i class="fa-solid fa-chart-simple"></i> Charts
+        </button>
+        <button class="btn btn-secondary flex-1" id="bs-btn-details" onclick="showNotification('Stock details loading...', 'info')" style="display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 13px; font-weight: 600; padding: 12px 6px;">
+          <i class="fa-regular fa-file-lines"></i> Stock Details
+        </button>
+      </div>
+
+      <!-- Position Actions (Convert / Stop Loss) -->
+      <div id="bs-position-actions" class="hidden" style="display: flex; gap: 8px; margin-bottom: 12px; border-top: 1px solid var(--border-color); padding-top: 12px;">
+        <button class="btn btn-secondary flex-1" onclick="showNotification('Conversion feature is not supported in this version', 'info')" style="display: flex; align-items: center; justify-content: center; gap: 6px; padding: 12px; font-size: 13px; font-weight: 600;">
+          <i class="fa-solid fa-arrows-rotate"></i> CONVERT
+        </button>
+        <button class="btn btn-secondary flex-1" onclick="showNotification('Stop Loss / Target form opening...', 'info')" style="display: flex; align-items: center; justify-content: center; gap: 6px; padding: 12px; font-size: 13px; font-weight: 600;">
+          <i class="fa-solid fa-circle-exclamation"></i> STOP LOSS/TARGET
+        </button>
+      </div>
+
+      <!-- Big Buy / Sell Buttons -->
+      <div class="bs-action-buttons" style="display: flex; gap: 12px;">
+        <button class="btn btn-buy flex-1" id="bs-btn-buy" style="padding: 14px; font-weight: 700; font-size: 15px; border-radius: 8px;">BUY</button>
+        <button class="btn btn-sell flex-1" id="bs-btn-sell" style="padding: 14px; font-weight: 700; font-size: 15px; border-radius: 8px;">SELL</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Option Chain Modal -->
+  <div id="options-chain-modal" class="bottom-sheet-modal hidden">
+    <div class="bottom-sheet-overlay" onclick="closeOptionChain()"></div>
+    <div class="bottom-sheet-content option-chain-sheet" style="max-height: 90vh; display: flex; flex-direction: column; padding: 20px 16px;">
+      <div class="bottom-sheet-drag-handle"></div>
+      
+      <!-- Option Chain Redesigned Header (Screenshot Match) -->
+      <div class="oc-new-header" style="display: flex; flex-direction: column; gap: 12px; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 12px;">
+        <div style="display: flex; align-items: center; gap: 12px; width: 100%;">
+          <button class="oc-btn-back" onclick="closeOptionChain()" style="background: transparent; border: none; color: var(--text-primary); font-size: 18px; cursor: pointer; padding: 4px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-arrow-left"></i></button>
+          
+          <!-- Dynamic Asset Toggles Container -->
+          <div class="oc-asset-selectors" id="oc-asset-selectors-container" style="display: flex; gap: 8px; flex: 1;">
+            <!-- Rendered dynamically via app.js -->
+          </div>
+        </div>
+
+        <!-- Controls Row -->
+        <div class="oc-controls-row" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+          <div class="oc-search-btn" style="color: var(--text-secondary); cursor: pointer; font-size: 16px; padding: 4px;"><i class="fa-solid fa-magnifying-glass"></i></div>
+          
+          <!-- LTP, OI, Greeks Segment Tabs -->
+          <div class="oc-segment-bar" style="display: flex; background: rgba(0,0,0,0.25); border: 1px solid var(--border-color); border-radius: 8px; padding: 2px;">
+            <button class="oc-segment-btn active" id="oc-segment-ltp" onclick="setOCSegment('LTP')">LTP</button>
+            <button class="oc-segment-btn" id="oc-segment-oi" onclick="setOCSegment('OI')">OI</button>
+            <button class="oc-segment-btn" id="oc-segment-greeks" onclick="setOCSegment('Greeks')">Greeks</button>
+          </div>
+
+          <!-- Expiry Date Dropdown -->
+          <select id="oc-expiry-select" onchange="refreshOptionChainTable()" style="background: rgba(0, 0, 0, 0.25); border: 1px solid var(--border-color); color: var(--text-primary); padding: 6px 12px; border-radius: 8px; font-size: 12px; outline: none; font-family: inherit; font-weight: 600; cursor: pointer;">
+            <option value="25JUN26" selected>30 Jun 2026 M</option>
+            <option value="30JUL26">30 Jul 2026 M</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Scrollable Option Chain Table -->
+      <div class="oc-table-container" style="flex: 1; overflow-y: auto; padding-right: 4px;">
+        <table class="oc-table" style="width: 100%; border-collapse: collapse; font-size: 13px;">
+          <thead>
+            <tr class="oc-table-header" style="border-bottom: 1px solid var(--border-color); text-transform: uppercase; font-size: 11px; color: var(--text-muted); text-align: center;">
+              <th style="padding: 10px 6px; font-weight: 600; width: 18%;">Volume</th>
+              <th style="padding: 10px 6px; font-weight: 600; width: 27%;">Call LTP</th>
+              <th style="padding: 10px 6px; font-weight: 600; width: 18%; background: rgba(130, 93, 250, 0.05); color: var(--text-primary);">Strike Price</th>
+              <th style="padding: 10px 6px; font-weight: 600; width: 27%;">Put LTP</th>
+              <th style="padding: 10px 6px; font-weight: 600; width: 18%;">Volume</th>
+            </tr>
+          </thead>
+          <tbody id="oc-table-body" style="text-align: center;">
+            <!-- Dynamically populated strikes rows -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Order Placement Modal -->
+  <div id="order-placement-modal" class="bottom-sheet-modal hidden">
+    <div class="bottom-sheet-overlay" onclick="closeOrderPlacement()"></div>
+    <div class="bottom-sheet-content order-sheet">
+      <div class="bottom-sheet-drag-handle"></div>
+      
+      <!-- Header with back button -->
+      <div class="order-header" style="display: flex; align-items: center; gap: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border-color); margin-bottom: 16px;">
+        <button class="btn-back" onclick="backToStockDetails()" style="background: transparent; border: none; color: var(--text-primary); font-size: 18px; cursor: pointer; padding: 4px;"><i class="fa-solid fa-arrow-left"></i></button>
+        <div class="order-title-block" style="display: flex; flex-direction: column; gap: 4px;">
+          <h2 id="order-symbol" style="font-size: 18px; font-weight: 700; margin: 0; color: var(--text-primary);">SBIN</h2>
+          <div class="order-exchanges" style="display: flex; gap: 12px; font-size: 11px; color: var(--text-secondary);">
+            <span id="order-exch-nse" onclick="setOrderExchange('NSE')" style="color: var(--text-primary); display: flex; align-items: center; gap: 4px; cursor: pointer;">
+              <span class="radio-dot" id="order-nse-dot" style="width: 6px; height: 6px; border-radius: 50%; background: #2ebd85; display: inline-block;"></span> 
+              NSE: <span id="order-nse-price" style="font-weight: 600;">₹1,017.15</span> 
+              <span id="order-nse-change" class="text-green" style="font-weight: 600;">(+1.64%)</span>
+            </span>
+            <span id="order-exch-bse" onclick="setOrderExchange('BSE')" style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+              <span class="radio-dot empty" id="order-bse-dot" style="width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--text-muted); display: inline-block;"></span> 
+              BSE: <span id="order-bse-price" style="font-weight: 600; color: var(--text-secondary);">₹1,016.90</span>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scrollable Content Body -->
+      <div class="order-scroll-content">
+        <!-- Product Toggle Buttons -->
+        <div class="order-product-toggle" style="display: flex; gap: 8px; margin-bottom: 16px;">
+          <button class="product-btn" id="prod-delivery" onclick="setProductType('DELIVERY')">DELIVERY</button>
+          <button class="product-btn active" id="prod-intraday" onclick="setProductType('INTRADAY')">INTRADAY <span>Buy 5x</span></button>
+          <button class="product-btn" id="prod-paylater" onclick="setProductType('PAY LATER')">PAY LATER <span>4.3x</span></button>
+        </div>
+
+        <!-- Account Selector Dropdown -->
+        <div class="order-input-group" style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;">
+          <label style="font-size: 13px; color: var(--text-secondary);">Select Account to Place Order</label>
+          <select id="order-account-select" onchange="calculateOrderMargin()" style="background: rgba(0, 0, 0, 0.03); border: 1px solid var(--border-color); color: var(--text-primary); padding: 12px; border-radius: 8px; font-size: 15px; font-family: inherit; outline: none; width: 100%;">
+            <!-- Dynamically loaded -->
+          </select>
+        </div>
+
+        <!-- Quantity Input -->
+        <div class="order-input-group" style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;">
+          <div class="input-header" style="display: flex; justify-content: space-between; font-size: 13px; color: var(--text-secondary);">
+            <label>No. of shares</label>
+            <span class="max-qty">Max Qty <span id="order-max-qty">14</span></span>
+          </div>
+          <input type="text" id="order-qty" inputmode="none" placeholder="Enter quantity" oninput="calculateOrderMargin()" style="background: rgba(0, 0, 0, 0.03); border: 1px solid var(--border-color); color: var(--text-primary); padding: 12px; border-radius: 8px; font-size: 16px; font-family: inherit; font-weight: 600;">
+        </div>
+
+        <!-- Price Input & Limit/Market Toggles -->
+        <div class="order-price-group" style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;">
+          <label style="font-size: 13px; color: var(--text-secondary);">Limit Price</label>
+          <div class="price-type-row" style="display: flex; gap: 12px; align-items: center;">
+            <!-- Price adjustment with separate minus/plus buttons -->
+            <div class="price-adjuster-row" style="flex: 2; display: flex; gap: 8px; align-items: center; height: 46px;">
+              <button class="adjust-btn-box" onclick="adjustOrderPrice(-0.05)"><i class="fa-solid fa-minus"></i></button>
+              <input type="text" id="order-price" inputmode="none" value="1017.15" oninput="calculateOrderMargin()" style="flex: 1; height: 100%; border: 1px solid var(--border-color); background: rgba(0, 0, 0, 0.03); border-radius: 8px; text-align: center; color: var(--text-primary); font-size: 16px; font-family: var(--font-mono); outline: none; box-sizing: border-box; font-weight: 600;">
+              <button class="adjust-btn-box" onclick="adjustOrderPrice(0.05)"><i class="fa-solid fa-plus"></i></button>
+            </div>
+            <!-- Limit / Market buttons -->
+            <div class="price-mode-toggle" style="flex: 1.2; display: flex; gap: 6px; height: 46px;">
+              <button class="mode-btn active" id="mode-limit" onclick="setPriceMode('LIMIT')">LIMIT</button>
+              <button class="mode-btn" id="mode-market" onclick="setPriceMode('MARKET')">MARKET</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Smart Orders Dropdown -->
+        <div class="smart-orders-accordion" style="border: 1px solid var(--border-color); border-radius: 12px; padding: 12px; margin-bottom: 16px; background: rgba(0, 0, 0, 0.01);">
+          <div class="accordion-header" onclick="toggleSmartOrders()" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; font-size: 12px; color: var(--text-secondary); font-weight: 500;">
+            <span>Smart Orders <span style="font-size: 10px; color: var(--text-muted);">(STOP LOSS, CO & ROBO)</span></span>
+            <i class="fa-solid fa-chevron-down" id="smart-chevron" style="transition: transform 0.25s;"></i>
+          </div>
+          <div class="accordion-content hidden" id="smart-content" style="display: none; padding-top: 12px;">
+            <div class="form-group">
+              <label style="font-size:12px; color:var(--text-secondary);">Stop Loss Trigger Price</label>
+              <input type="number" placeholder="Enter trigger price" style="background: rgba(0, 0, 0, 0.03); border:1px solid var(--border-color); padding: 10px; border-radius: 8px; color: var(--text-primary); width:100%; margin-top:6px; font-size:14px; outline:none; font-family:inherit; font-weight: 600;">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sticky footer group for margins and submit button -->
+      <div class="order-footer-group">
+        <!-- Margin Footnotes -->
+        <div class="order-margin-info" style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 12px;">
+          <div class="margin-item" style="display: flex; flex-direction: column; gap: 4px;">
+            <span class="label" style="color: var(--text-secondary);">Margin Required (Approx)</span>
+            <span class="value" id="order-margin-val" style="font-size: 14px; font-weight: 700; color: var(--text-primary);">₹0.00</span>
+          </div>
+          <div class="margin-item text-right" style="display: flex; flex-direction: column; gap: 4px; text-align: right;">
+            <span class="label" style="color: var(--text-secondary);">Available Margin</span>
+            <span class="value" style="font-size: 14px; font-weight: 700; color: var(--text-primary);">₹2,946.46 <i class="fa-solid fa-circle-info" style="font-size: 11px; color: var(--text-secondary); margin-left: 2px;"></i></span>
+          </div>
+        </div>
+
+        <!-- Submit Order Button -->
+        <button class="btn btn-order-submit" id="btn-submit-order" onclick="submitPlacedOrder()" style="width: 100%; padding: 14px; font-size: 15px; font-weight: 700; border-radius: 8px; border: none; cursor: pointer; color: #fff; transition: var(--transition);">PLACE BUY ORDER</button>
+      </div>
+
+      <!-- In-App Custom Numeric Keypad -->
+      <div id="custom-numeric-keypad" class="custom-keypad hidden">
+        <div class="keypad-layout">
+          <!-- Left column (BEST 5, Hide arrow) -->
+          <div class="keypad-sidebar">
+            <div class="keypad-btn spacer-btn"></div>
+            <button type="button" class="keypad-btn best5-btn" onclick="pressBest5()">
+              <i class="fa-solid fa-shield-halved"></i>
+              <span>BEST 5</span>
+            </button>
+            <button type="button" class="keypad-btn hide-key-btn" onclick="hideKeypad()">
+              <i class="fa-solid fa-chevron-down"></i>
+            </button>
+          </div>
+          <!-- Numeric keys (3 columns, 4 rows) -->
+          <div class="keypad-numeric-grid">
+            <button type="button" class="keypad-btn" onclick="pressKeypad('1')">1</button>
+            <button type="button" class="keypad-btn" onclick="pressKeypad('2')">2</button>
+            <button type="button" class="keypad-btn" onclick="pressKeypad('3')">3</button>
+            
+            <button type="button" class="keypad-btn" onclick="pressKeypad('4')">4</button>
+            <button type="button" class="keypad-btn" onclick="pressKeypad('5')">5</button>
+            <button type="button" class="keypad-btn" onclick="pressKeypad('6')">6</button>
+            
+            <button type="button" class="keypad-btn" onclick="pressKeypad('7')">7</button>
+            <button type="button" class="keypad-btn" onclick="pressKeypad('8')">8</button>
+            <button type="button" class="keypad-btn" onclick="pressKeypad('9')">9</button>
+            
+            <button type="button" class="keypad-btn decimal-key" id="keypad-decimal" onclick="pressKeypad('.')">.</button>
+            <button type="button" class="keypad-btn" onclick="pressKeypad('0')">0</button>
+            <button type="button" class="keypad-btn backspace-key" onclick="pressKeypad('BACKSPACE')"><i class="fa-solid fa-delete-left"></i></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TradingView Chart Modal -->
+  <div id="chart-modal" class="bottom-sheet-modal hidden" style="z-index: 999999;">
+    <div class="bottom-sheet-overlay" onclick="closeChartModal()"></div>
+    <div class="bottom-sheet-content" style="height: 100vh; max-height: 100vh; width: 100vw; border-radius: 0; padding: 0; display: flex; flex-direction: column; background: #0c0e1a;">
+      <!-- Compact Top Header Bar -->
+      <div class="chart-modal-header" style="height: 44px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; background: #0c0e1a; border-bottom: 1px solid rgba(255,255,255,0.06); width: 100%; box-sizing: border-box; flex-shrink: 0; margin-top: env(safe-area-inset-top, 0px);">
+        <button onclick="closeChartModal()" style="background: transparent; border: none; color: #fff; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 4px; outline: none;"><i class="fa-solid fa-arrow-left"></i></button>
+        <div style="display: flex; gap: 8px; align-items: center; overflow-x: auto; scrollbar-width: none;">
+          <!-- Active Symbol Badge -->
+          <div style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 4px 10px; font-size: 11px; display: flex; align-items: center; gap: 6px; color: #fff; white-space: nowrap;">
+            <span id="chart-header-symbol" style="font-weight: 700;">SBIN</span>
+            <span id="chart-header-price" style="color: #2ebd85; font-weight: 600;">₹1017.15</span>
+          </div>
+          <!-- NIFTY Index Badge -->
+          <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 6px; padding: 4px 10px; font-size: 11px; display: flex; align-items: center; gap: 6px; color: var(--text-secondary); white-space: nowrap;">
+            <span>NIFTY</span>
+            <span id="chart-header-nifty" style="color: #2ebd85; font-weight: 600;">23,980.65</span>
+          </div>
+        </div>
+        <div style="width: 10px;"></div>
+      </div>
+      
+      <!-- Interactive Chart Area -->
+      <div id="tradingview-widget-container" style="flex: 1; width: 100%; overflow: hidden; background: #14182e; position: relative;">
+        <!-- Collapsible side toolbar toggle button -->
+        <button id="chart-toolbar-toggle" onclick="toggleChartSidebar()" style="position: absolute; bottom: 90px; left: 0; z-index: 99999999; background: #2962ff; border: none; color: #fff; width: 20px; height: 40px; border-radius: 0 20px 20px 0; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 2px 0 8px rgba(0,0,0,0.45); transition: left 0.15s ease-out;"><i class="fa-solid fa-chevron-right" id="chart-toolbar-toggle-icon" style="font-size: 10px;"></i></button>
+        <!-- TradingView iframe widget will load dynamically -->
+      </div>
+      
+      <!-- Bottom Buy & Sell Buttons Sticky Footer -->
+      <div class="chart-action-footer" style="padding: 12px 16px; background: #0c0e1a; display: flex; gap: 12px; border-top: 1px solid rgba(255,255,255,0.06); width: 100%; box-sizing: border-box;">
+        <button class="btn btn-buy flex-1" id="chart-btn-buy" onclick="submitChartOrder('BUY')" style="padding: 14px; font-weight: 700; font-size: 15px; border-radius: 8px; border: none; cursor: pointer;">BUY</button>
+        <button class="btn btn-sell flex-1" id="chart-btn-sell" onclick="submitChartOrder('SELL')" style="padding: 14px; font-weight: 700; font-size: 15px; border-radius: 8px; border: none; cursor: pointer;">SELL</button>
+      </div>
+    </div>
+  </div>
+  <!-- Group Management Modal -->
+  <div id="group-modal" class="bottom-sheet-modal hidden" style="z-index: 999999;">
+    <div class="bottom-sheet-overlay" onclick="closeGroupModal()"></div>
+    <div class="bottom-sheet-content order-sheet" style="background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-primary); backdrop-filter: blur(20px);">
+      <div class="bottom-sheet-drag-handle" style="background: rgba(0, 0, 0, 0.1);"></div>
+      <div class="order-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 0;">
+        <h2 id="group-modal-title" style="font-size: 17px; font-weight: 700; color: var(--text-primary); margin: 0; display: flex; align-items: center; gap: 8px;"><i class="fa-solid fa-folder-plus" style="color: var(--primary);"></i> Create Copy Group</h2>
+        <button onclick="closeGroupModal()" style="background: transparent; border: none; color: var(--text-secondary); font-size: 20px; cursor: pointer; padding: 4px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      
+      <div class="order-scroll-content" style="display: flex; flex-direction: column; gap: 14px; overflow-y: auto;">
+        <!-- Group ID (hidden) -->
+        <input type="hidden" id="group-id">
+
+        <!-- Group Name Input -->
+        <div class="form-group" style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-size: 12px; color: var(--text-secondary); font-weight: 600;">Group Name</label>
+          <input type="text" id="group-name" placeholder="e.g. Scalping Group" style="background: var(--bg-primary); border: 1px solid var(--border-color); color: var(--text-primary); padding: 10px 12px; border-radius: 8px; font-size: 14px; outline: none; font-family: inherit; box-sizing: border-box; width: 100%; transition: var(--transition);">
+        </div>
+        
+        <!-- Master Selection -->
+        <div class="form-group" style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-size: 12px; color: var(--text-secondary); font-weight: 600;">Select Master Account</label>
+          <select id="group-master" style="background: var(--bg-primary); border: 1px solid var(--border-color); color: var(--text-primary); padding: 10px 12px; border-radius: 8px; font-size: 14px; outline: none; font-family: inherit; cursor: pointer; width: 100%; box-sizing: border-box; transition: var(--transition);">
+            <!-- Options dynamically loaded -->
+          </select>
+        </div>
+        
+        <!-- Children Configuration -->
+        <div class="form-group" style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-size: 12px; color: var(--text-secondary); font-weight: 600;">Configure Child Accounts & Multipliers</label>
+          <div id="group-children-list" style="display: flex; flex-direction: column; gap: 8px; margin-top: 4px;">
+            <!-- Dynamically populated rows of child checkboxes + multipliers -->
+          </div>
+        </div>
+      </div>
+      
+      <!-- Footer Save Button -->
+      <div class="order-footer-group" style="padding: 12px 16px; border-top: 1px solid var(--border-color); display: flex; gap: 12px; background: rgba(0,0,0,0.02); margin-bottom: env(safe-area-inset-bottom, 0px);">
+        <button class="btn btn-secondary flex-1" onclick="closeGroupModal()" style="padding: 10px; border-radius: 8px; font-weight: 600; cursor: pointer; border: 1px solid var(--border-color); background: transparent; color: var(--text-primary); font-size: 14px;">Cancel</button>
+        <button class="btn btn-primary flex-1" onclick="saveGroup()" style="padding: 10px; border-radius: 8px; font-weight: 600; cursor: pointer; border: none; font-size: 14px;">Save Group</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- System Trade Logs Modal -->
+  <div id="logs-modal" class="bottom-sheet-modal hidden" style="z-index: 999999;">
+    <div class="bottom-sheet-overlay" onclick="closeLogsModal()"></div>
+    <div class="bottom-sheet-content order-sheet" style="background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-primary); max-width: 600px; display: flex; flex-direction: column; backdrop-filter: blur(20px);">
+      <div class="bottom-sheet-drag-handle" style="background: rgba(0, 0, 0, 0.1);"></div>
+      <div class="order-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 0;">
+        <h2 style="font-size: 17px; font-weight: 700; color: var(--text-primary); margin: 0; display: flex; align-items: center; gap: 8px;"><i class="fa-solid fa-terminal" style="color: var(--primary);"></i> System Trade Logs</h2>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <button onclick="clearLogs()" style="background: transparent; border: none; color: var(--red); font-size: 16px; cursor: pointer; padding: 4px; display: flex; align-items: center; justify-content: center; outline: none;" title="Clear Logs"><i class="fa-solid fa-trash-can"></i></button>
+          <button onclick="closeLogsModal()" style="background: transparent; border: none; color: var(--text-secondary); font-size: 20px; cursor: pointer; padding: 4px; display: flex; align-items: center; justify-content: center; outline: none;"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+      </div>
+      
+      <div class="order-scroll-content" style="display: flex; flex-direction: column; gap: 14px; overflow-y: auto;">
+        <div id="modal-logs-container" class="console-output" style="flex: 1; overflow-y: auto; padding: 12px; border-radius: 8px; min-height: 350px; max-height: 50vh;">
+          <!-- Dynamically filled logs stream -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Simulated Account P&L Report Modal -->
+  <div id="pnl-report-modal" class="bottom-sheet-modal hidden" style="z-index: 999999;">
+    <div class="bottom-sheet-overlay" onclick="closePnlReportModal()"></div>
+    <div class="bottom-sheet-content order-sheet" style="background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-primary); max-width: 700px; display: flex; flex-direction: column; backdrop-filter: blur(20px);">
+      <div class="bottom-sheet-drag-handle" style="background: rgba(0, 0, 0, 0.1);"></div>
+      <div class="order-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 0;">
+        <h2 style="font-size: 17px; font-weight: 700; color: var(--text-primary); margin: 0; display: flex; align-items: center; gap: 8px;"><i class="fa-solid fa-chart-line" style="color: var(--primary);"></i> Simulated P&L Report</h2>
+        <button onclick="closePnlReportModal()" style="background: transparent; border: none; color: var(--text-secondary); font-size: 20px; cursor: pointer; padding: 4px; display: flex; align-items: center; justify-content: center; outline: none;"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      
+      <div class="order-scroll-content" style="display: flex; flex-direction: column; gap: 14px; overflow-y: auto; padding-top: 10px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255,255,255,0.03); padding: 12px; border-radius: 8px; border: 1px solid var(--border-color);">
+          <div>
+            <div style="font-size: 12px; color: var(--text-muted);">Total Realized P&L</div>
+            <div id="pnl-report-total" style="font-size: 18px; font-weight: 700; color: var(--text-primary);">₹0.00</div>
+          </div>
+          <div>
+            <div style="font-size: 12px; color: var(--text-muted);">Total Closed Trades</div>
+            <div id="pnl-report-count" style="font-size: 18px; font-weight: 700; color: var(--text-primary);">0</div>
+          </div>
+        </div>
+        <div style="flex: 1; overflow-x: auto; min-height: 250px; max-height: 50vh;">
+          <table class="data-table" style="width: 100%; border-collapse: collapse;">
+            <thead>
+              <tr>
+                <th style="text-align: left; padding: 8px;">Time</th>
+                <th style="text-align: left; padding: 8px;">Symbol</th>
+                <th style="text-align: left; padding: 8px;">Type</th>
+                <th style="text-align: right; padding: 8px;">Qty</th>
+                <th style="text-align: right; padding: 8px;">Buy Avg</th>
+                <th style="text-align: right; padding: 8px;">Sell Avg</th>
+                <th style="text-align: right; padding: 8px;">Realized P&L</th>
+              </tr>
+            </thead>
+            <tbody id="pnl-report-table-body">
+              <!-- Closed trades rows will go here -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app_v6.min.js?v=2.7.7"></script>
+</body>
+</html>

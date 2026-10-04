@@ -1,0 +1,34 @@
+const { Client } = require('ssh2');
+
+const config = {
+  host: '34.93.162.96',
+  port: 22,
+  username: 'tradenterinvest',
+  password: 'mahesh789',
+  readyTimeout: 30000
+};
+
+const conn = new Client();
+
+conn.on('ready', () => {
+  console.log('SSH connection established. Checking gcloud on VPS...');
+  conn.exec('gcloud info || echo "gcloud command not found"', (err, stream) => {
+    if (err) {
+      console.error(err);
+      conn.end();
+      return;
+    }
+    let out = '';
+    stream.on('close', (code) => {
+      console.log('\n--- VPS EXECUTION OUTPUT ---');
+      console.log(out);
+      conn.end();
+    }).on('data', (data) => {
+      out += data.toString();
+    }).stderr.on('data', (data) => {
+      out += '[STDERR] ' + data.toString();
+    });
+  });
+}).on('error', (err) => {
+  console.error('Connection error:', err);
+}).connect(config);

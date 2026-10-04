@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.*
+!.env.example
+backend/.keys/
+backend/config.json
+backend/copied_orders.json
+backend/watchlists.json
+backend/*.db*
+*.tmp
+*.log
+backend/api-scrip-master.csv
+backend/services/angelOneInstruments.json
