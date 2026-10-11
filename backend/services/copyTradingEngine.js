@@ -63,6 +63,7 @@ class CopyTradingEngine {
     const valid = validation.mappings(mappings, Object.keys(this.services));
     for (const mapping of valid) {
       if (this.services[mapping.masterId].account.ownerId !== this.services[mapping.childId].account.ownerId) validation.reject('Cross-user mappings are prohibited');
+      if (this.services[mapping.masterId].account.isSimulated && !this.services[mapping.childId].account.isSimulated) validation.reject('Paper source accounts can only copy to paper followers');
       const link = mapping.masterId + ':' + mapping.childId + ':' + mapping.multiplier;
       if (!this.activatedAt.has(link)) this.activatedAt.set(link, Date.now());
     }
@@ -199,6 +200,7 @@ class CopyTradingEngine {
           const child = this.services[mapping.childId];
           if (!child) continue;
           try {
+          if (this.services[masterId].account.isSimulated && !child.account.isSimulated) throw new Error('Paper source accounts cannot copy to live followers');
           const expected = filled * mapping.multiplier;
           if (!Number.isSafeInteger(expected) || expected <= 0) {
             this.addLog({ timestamp: new Date().toISOString(), accountId: mapping.childId, type: 'error', message: 'Copy quantity is fractional; adjust multiplier' });
@@ -215,7 +217,7 @@ class CopyTradingEngine {
           const params = { tradingsymbol: order.tradingsymbol, symboltoken: order.symboltoken, exchange, transactiontype: side, quantity: expected - reserved, price: childPrice, ordertype: childOrderType, producttype: mapProductType(order.producttype, child.account.broker, exchange), expiry: order.expiry || order.expirydate, expirydate: order.expirydate || order.expiry, optiontype: order.optiontype, strike: order.strike || order.strikeprice, strikeprice: order.strikeprice || order.strike };
           const contract = require('./instrumentService').resolveContract(params.tradingsymbol, exchange);
           if (contract) { params.tradingsymbol = contract.symbol; params.symboltoken = contract.token; }
-          await queue.enqueueOrder(child.account.ownerId, mapping.childId, params, { trackingKey, expectedChildQty: expected, masterOrderId: order.orderid });
+          await queue.enqueueOrder(child.account.ownerId, mapping.childId, params, { trackingKey, expectedChildQty: expected, masterOrderId: order.orderid, masterAccountId: masterId });
           } catch (error) { this.addLog({ timestamp: new Date().toISOString(), accountId: mapping.childId, type: 'error', message: 'Copy could not be queued: ' + error.message }); }
         }
       }

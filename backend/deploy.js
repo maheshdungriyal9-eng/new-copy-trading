@@ -40,7 +40,7 @@ const config = {
 
 // Map local file paths to their remote target paths
 const filesToUpload = [
-  ...['index.html', 'style.min.css', 'app_v6.min.js'].map(filename => ({ local: path.join(__dirname, '../frontend', filename), remote: remoteRoot + '/frontend/' + filename })),
+  ...['index.html', 'style.min.css', 'app_v6.min.js', 'relay-mark.svg', 'relay-manrope.woff2', 'relay-spacegrotesk.woff2', 'relay-jetbrainsmono.woff2', 'relay-font-licenses.txt'].map(filename => ({ local: path.join(__dirname, '../frontend', filename), remote: remoteRoot + '/frontend/' + filename })),
   ...['server.js', 'package.json', 'package-lock.json'].map(filename => ({ local: path.join(__dirname, filename), remote: remoteRoot + '/backend/' + filename })),
   ...fs.readdirSync(path.join(__dirname, 'services')).filter(filename => /\.(js|json)$/.test(filename)).map(filename => ({ local: path.join(__dirname, 'services', filename), remote: remoteRoot + '/backend/services/' + filename }))
 ];

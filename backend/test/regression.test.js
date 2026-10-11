@@ -223,6 +223,23 @@ test('product mappings preserve intraday, carry-forward and financed delivery', 
   assert.equal(mapProductType('CNC', 'motilal', 'NSE'), 'DELIVERY');
 });
 
+test('paper sources cannot configure or execute live follower copies', async () => {
+  const engine = new CopyTradingEngine();
+  engine.services = {
+    paper: { account: { ownerId: 'user', isSimulated: true } },
+    live: { account: { ownerId: 'user', isSimulated: false } }
+  };
+  const link = { masterId: 'paper', childId: 'live', multiplier: 1, active: true };
+  assert.throws(() => engine.setMappings([link]), /only copy to paper/);
+  let submissions = 0;
+  engine.queue = { enqueueOrder: async () => submissions++ };
+  // Defence in depth for an old or externally loaded unsafe mapping.
+  engine.mappings = [link];
+  await engine.processExecutedOrders('paper', [{ ...baseOrder, orderid: 'paper-fill', filledshares: 10 }]);
+  assert.equal(submissions, 0);
+  assert.match(engine.getLogs()[0].message, /cannot copy to live/);
+});
+
 test('first baseline keeps newly executed orders eligible for copying', async () => {
   const engine = new CopyTradingEngine();
   const now = Date.now();
@@ -403,6 +420,20 @@ test('HTTP auth, account isolation, persistent watchlists and safe account edits
   const jobs = await (await request('/api/queue/jobs', undefined, 'GET')).json();
   assert.ok(Array.isArray(jobs));
   assert.ok(jobs.some(job => job.id === queued.jobId));
+  const runtime = await (await request('/api/system/status', undefined, 'GET')).json();
+  assert.equal(runtime.offline, true);
+  const liveResponse = await request('/api/accounts', { name: 'Unconnected live test', broker: 'angel_one', isSimulated: false, clientCode: 'TEST', password: 'test-only' });
+  assert.equal(liveResponse.status, 200);
+  const liveAccount = (await liveResponse.json()).account;
+  const refused = await request('/api/paper/execute-trade', { ...baseOrder, accountId: liveAccount.id });
+  assert.equal(refused.status, 400);
+  assert.match((await refused.json()).error, /only accepts paper accounts/);
+  const unsafeMapping = await request('/api/mappings', [{ masterId: 'mine', childId: liveAccount.id, multiplier: 1, active: true }]);
+  assert.equal(unsafeMapping.status, 400);
+  assert.deepEqual(config.loadConfig().users[0].mappings, []);
+  const paperResponse = await request('/api/paper/execute-trade', { ...baseOrder, accountId: 'mine', ordertype: 'LIMIT', price: 50, requestId: 'paper-practice-order-id' });
+  assert.equal(paperResponse.status, 200);
+  assert.equal((await paperResponse.json()).status, 'QUEUED');
   await until(async () => (await require('../services/orderQueueService').getJobStatus(queued.jobId)).status === 'ACCEPTED');
   assert.equal((await request('/api/webhooks/dhan', { orderId: 'fake' })).status, 401);
   assert.equal((await request('/api/auth/logout', {})).status, 200);

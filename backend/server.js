@@ -407,6 +407,14 @@ app.post('/api/connect/:id', async (req, res) => {
   res.json({ success, connected: service.session.connected });
 });
 
+function validateCopySetup(mappings, accounts) {
+  const valid = validation.mappings(mappings, accounts.map(account => account.id));
+  for (const link of valid) {
+    if (accounts.find(account => account.id === link.masterId).isSimulated && !accounts.find(account => account.id === link.childId).isSimulated) validation.reject('Paper source accounts can only copy to paper followers');
+  }
+  return valid;
+}
+
 // Get copy mappings for logged-in user
 app.get('/api/mappings', (req, res) => {
   const userId = req.headers['x-user-id'] || 'usr_default';
@@ -418,7 +426,7 @@ app.get('/api/mappings', (req, res) => {
 app.post('/api/mappings', (req, res) => {
   const userId = req.headers['x-user-id'] || 'usr_default';
   const { config, user } = getUserConfig(userId);
-  user.mappings = validation.mappings(req.body, user.accounts.map(account => account.id));
+  user.mappings = validateCopySetup(req.body, user.accounts);
   saveConfig(config);
   rebuildGlobalMappings();
   res.json({ success: true });
@@ -440,7 +448,7 @@ app.post('/api/groups', (req, res) => {
     return { id: String(group.id || crypto.randomUUID()), name: group.name, masterId: group.masterId, active: group.active !== false, children: group.children.map(child => ({ childId: child.childId, multiplier: Number(child.multiplier), active: child.active !== false })) };
   });
   const mappings = groups.flatMap(group => group.children.map(child => ({ masterId: group.masterId, childId: child.childId, multiplier: child.multiplier, active: group.active && child.active })));
-  const valid = validation.mappings(mappings, user.accounts.map(account => account.id));
+  const valid = validateCopySetup(mappings, user.accounts);
   user.groups = groups;
   user.mappings = valid;
   saveConfig(config);
@@ -518,7 +526,11 @@ app.get('/api/portfolio/:id', async (req, res) => {
 });
 
 // Trigger order placement on Master -> automatically triggers copy, or Child -> direct manual trade
-app.post('/api/execute-trade', async (req, res) => {
+app.get('/api/system/status', (req, res) => {
+  res.json({ offline: process.env.OFFLINE_MODE === 'true', serverTime: new Date().toISOString() });
+});
+
+app.post(['/api/execute-trade', '/api/paper/execute-trade'], async (req, res) => {
   const userId = req.headers['x-user-id'] || 'usr_default';
   const { accountId, masterId } = req.body;
   const targetId = accountId || masterId;
@@ -535,6 +547,7 @@ app.post('/api/execute-trade', async (req, res) => {
   }
 
   try {
+    if (req.path === '/api/paper/execute-trade' && !acc.isSimulated) validation.reject('Paper practice only accepts paper accounts. Select a paper account.');
     const params = validation.trade(req.body);
     if (req.body.requestId && !/^[a-zA-Z0-9_-]{16,80}$/.test(req.body.requestId)) validation.reject('Invalid request ID');
     await copyEngine.validateOrder(targetId, params);

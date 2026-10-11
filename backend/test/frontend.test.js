@@ -82,3 +82,25 @@ test('frontend tolerates unavailable quotes and shows absent market depth', () =
   client.run('updateBSMarketDepthPrices(null, null)');
   assert.equal(client.elements.get('bs-depth-rows').textContent, 'Market depth unavailable');
 });
+
+test('quote freshness uses received timestamps and unavailable quotes stay neutral', () => {
+  const client = frontend();
+  client.run("handleWatchlistPricesData({prices:{'NIFTY-EQ':{ltp:null,quoteStatus:'unavailable'}},marketOpen:false})");
+  assert.equal(client.elements.get('watchlist-last-tick').textContent, 'No quote received');
+  assert.equal(client.elements.get('index-nifty-ltp').className, 'index-ltp text-muted');
+  assert.equal(client.elements.get('market-status-badge').className, 'text-muted');
+  client.run("handleWatchlistPricesData({prices:{'NIFTY-EQ':{ltp:20000,updatedAt:Date.now()-120000,quoteStatus:'stale'}},marketOpen:false})");
+  assert.match(client.elements.get('watchlist-last-tick').textContent, /Stale/);
+  assert.equal(client.run("executionLabel('ACCEPTED')"), 'Accepted · awaiting fill');
+  assert.equal(client.run("executionLabel('RECONCILE_REQUIRED')"), 'Broker check required');
+});
+
+test('paper practice offers connected paper accounts only', () => {
+  const client = frontend();
+  const names = [];
+  client.run("document.getElementById('sim-master')");
+  client.elements.get('sim-master').appendChild = option => names.push(option.textContent);
+  client.run("accounts = [{id:'paper',name:'Practice',isSimulated:true,connected:true},{id:'live',name:'Real',isSimulated:false,connected:true},{id:'disconnected',name:'Disconnected',isSimulated:true,connected:false}]; populateSimulatorDropdowns()");
+  assert.equal(names.length, 1);
+  assert.match(names[0], /Practice.*Paper/);
+});

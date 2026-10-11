@@ -45,12 +45,14 @@ window.addEventListener('unhandledrejection', function(event) {
 // Global State
 let accounts = [];
 let mappings = [];
+let savedCopyLinks = [];
 let groups = [];
 let activeTab = 'overview';
 let logPoller = null;
 
 // Premium Toast Notification Utility
-function showNotification(message, type = 'success') {
+function showNotification(message, type) {
+  type = type || (/error|failed|cannot|invalid|could not/i.test(message) ? 'error' : /success|saved|updated|added|removed/i.test(message) ? 'success' : 'info');
   let container = document.getElementById('notification-container');
   if (!container) {
     container = document.createElement('div');
@@ -60,6 +62,8 @@ function showNotification(message, type = 'success') {
   }
 
   const toast = document.createElement('div');
+  toast.dataset.type = type;
+  toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
   toast.style.cssText = `
     padding: 14px 22px;
     border-radius: 10px;
@@ -267,6 +271,204 @@ function getPositionAvgPrice(pos) {
 // API Base URL (running on same local port)
 const API_BASE = '/api';
 
+// Shared interaction and health state. Broker connectivity and quote freshness
+// are separate from whether the application server is reachable.
+let healthPoller = null;
+let healthRequestPending = false;
+let runtimeState = { online: false, offline: null };
+let latestQuoteAt = null;
+let recentExecutionJobs = [];
+function stopHealthPolling() { clearInterval(healthPoller); healthPoller = null; }
+function startHealthPolling() {
+  stopHealthPolling();
+  refreshHealth();
+  healthPoller = setInterval(refreshHealth, 10000);
+}
+async function refreshHealth() {
+  if (healthRequestPending) return;
+  healthRequestPending = true;
+  try {
+    const response = await fetch(API_BASE + '/system/status', { signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error('Server unavailable');
+    runtimeState = { online: true, ...(await response.json()) };
+    const responseAccounts = await fetch(API_BASE + '/accounts', { signal: AbortSignal.timeout(8000) });
+    if (responseAccounts.ok) {
+      accounts = await responseAccounts.json();
+      renderQuickStatusList(); renderOverviewStats(); renderSetupGuide();
+    }
+    await restoreOrderMonitoring();
+  } catch (error) { runtimeState.online = false; }
+  finally { healthRequestPending = false; renderRuntimeStatus(); renderQuoteFreshness(); }
+}
+function renderRuntimeStatus() {
+  const element = document.getElementById('runtime-status');
+  if (!element) return;
+  const brokers = accounts.filter(account => !account.isSimulated);
+  const connected = brokers.filter(account => account.connected).length;
+  const mode = runtimeState.offline ? 'Offline mode · startup broker connections and quote downloads paused' : runtimeState.offline === false ? 'Broker connections enabled' : 'Mode unknown';
+  element.className = 'runtime-status' + (!runtimeState.online ? ' needs-attention' : '');
+  element.textContent = `${runtimeState.online ? 'Server connected' : 'Server unreachable · connection status may be outdated'} · ${mode} · Live brokers ${connected}/${brokers.length}`;
+}
+function renderQuoteFreshness() {
+  const element = document.getElementById('watchlist-last-tick');
+  if (!element) return;
+  if (!latestQuoteAt) { element.textContent = 'No quote received'; element.className = 'text-muted'; return; }
+  const age = Math.max(0, Math.floor((Date.now() - latestQuoteAt) / 1000));
+  element.textContent = new Date(latestQuoteAt).toLocaleTimeString() + (age > 60 ? ' · Stale' : ' · Recent');
+  element.title = `Last received quote: ${new Date(latestQuoteAt).toLocaleString()}`;
+  element.className = age > 60 ? 'text-warning' : 'text-primary';
+}
+function renderSetupGuide() {
+  const element = document.getElementById('setup-guide');
+  if (!element) return;
+  const configured = accounts.length >= 2;
+  const connected = accounts.filter(account => account.connected).length >= 2;
+  const linked = savedCopyLinks.length > 0;
+  const enabled = savedCopyLinks.some(link => link.active);
+  element.innerHTML = `<h3>${enabled ? 'Copy setup checklist' : 'Get ready to copy'}</h3><p>Start with paper accounts, then review every follower quantity before enabling a link.</p><ol class="setup-steps">${[
+    [configured, 'Add accounts', 'Add a source and at least one follower.', 'accounts'],
+    [connected, 'Connect accounts', 'Confirm both accounts are connected.', 'accounts'],
+    [linked, 'Set copy quantities', 'Choose followers and review each multiplier.', 'mappings'],
+    [enabled, 'Enable copying', 'Enable the link and save your copy setup.', 'mappings']
+  ].map(([done, title, detail, tab], index) => `<li class="${done ? 'complete' : ''}"><span class="step-number">${done ? '✓' : index + 1}</span><div><button class="text-button" onclick="switchTab('${tab}')">${title}</button><p>${detail}</p></div></li>`).join('')}</ol>`;
+  renderRuntimeStatus();
+}
+function clearFormErrors(containerId) {
+  const container = document.getElementById(containerId);
+  container?.querySelectorAll('.form-error').forEach(element => element.remove());
+  container?.querySelectorAll('[aria-invalid]').forEach(element => { element.removeAttribute('aria-invalid'); element.removeAttribute('aria-errormessage'); });
+}
+function setFormError(containerId, message, fieldId) {
+  const container = document.getElementById(containerId);
+  if (!container) return showNotification(message, 'error');
+  clearFormErrors(containerId);
+  const error = document.createElement('p');
+  error.id = containerId + '-error'; error.className = 'form-error'; error.setAttribute('role', 'alert'); error.textContent = message;
+  const field = fieldId && document.getElementById(fieldId);
+  if (field) {
+    field.insertAdjacentElement('afterend', error); field.setAttribute('aria-invalid', 'true'); field.setAttribute('aria-errormessage', error.id); field.focus();
+  } else {
+    const host = container.querySelector('.bottom-sheet-content') || container;
+    host.prepend(error); error.scrollIntoView({ block: 'nearest' });
+  }
+}
+function openActionDialog({ title, description, fields = [], submitLabel = 'Continue', onSubmit }) {
+  return new Promise(resolve => {
+    const previousFocus = document.activeElement;
+    const dialog = document.createElement('dialog');
+    dialog.className = 'action-dialog';
+    dialog.setAttribute('aria-labelledby', 'action-dialog-title');
+    dialog.innerHTML = `<form><h2 id="action-dialog-title">${escapeHtml(title)}</h2><p class="dialog-description">${escapeHtml(description)}</p>${fields.map(field => `<label>${escapeHtml(field.label)}<input name="${escapeHtml(field.name)}" type="number" required min="${field.min ?? 0}" step="${field.step ?? 'any'}" value="${escapeHtml(field.value)}"></label>`).join('')}<p class="form-error" role="alert" hidden></p><div class="dialog-actions"><button type="button" class="btn btn-secondary">Cancel</button><button type="submit" class="btn btn-primary">${escapeHtml(submitLabel)}</button></div></form>`;
+    const close = approved => { dialog.close(); dialog.remove(); previousFocus?.focus(); resolve(approved); };
+    let submitting = false;
+    dialog.querySelector('[type="button"]').onclick = () => { if (!submitting) close(false); };
+    dialog.addEventListener('cancel', event => { event.preventDefault(); if (!submitting) close(false); });
+    dialog.querySelector('form').onsubmit = async event => {
+      event.preventDefault(); if (submitting) return;
+      const error = dialog.querySelector('.form-error'); error.hidden = true;
+      submitting = true;
+      dialog.querySelectorAll('button').forEach(button => button.disabled = true);
+      try { await onSubmit?.(Object.fromEntries(new FormData(event.target))); close(true); }
+      catch (failure) { error.textContent = failure.message; error.hidden = false; }
+      finally { submitting = false; dialog.querySelectorAll('button').forEach(button => button.disabled = false); }
+    };
+    document.body.appendChild(dialog); dialog.showModal();
+  });
+}
+function updateOrderContext() {
+  const account = accounts.find(account => account.id === document.getElementById('order-account-select')?.value);
+  const element = document.getElementById('order-mode-context');
+  if (element) {
+    element.textContent = !account ? 'Choose an account to continue.' : account.isSimulated ? `Paper order · ${account.name} · simulated funds` : `Live order · ${account.name} · uses real funds`;
+    element.className = 'mode-context ' + (account && !account.isSimulated ? 'live-mode' : 'paper-mode');
+  }
+  const button = document.getElementById('btn-submit-order');
+  if (button && !button.disabled) button.textContent = `${account?.isSimulated ? 'PLACE PAPER' : 'REVIEW LIVE'} ${currentOrderSide} ORDER`;
+}
+function reviewLiveOrder(account, order) {
+  const followers = savedCopyLinks.filter(link => link.active && link.masterId === account.id).map(link => {
+    const follower = accounts.find(item => item.id === link.childId);
+    return `${follower?.name || 'Unavailable follower'} (${follower?.isSimulated ? 'Paper' : 'Live'}): ${order.quantity * link.multiplier} units at ${link.multiplier}×`;
+  });
+  return openActionDialog({ title: 'Review live order', submitLabel: `Place live ${order.transactiontype.toLowerCase()} order`, description: `${account.name}\n${order.transactiontype} ${order.quantity} × ${order.tradingsymbol} · ${order.exchange}\n${order.producttype} · ${order.ordertype === 'MARKET' ? 'Market price at execution' : 'Limit ₹' + order.price}\n${followers.length ? 'Copy followers on confirmed fills:\n' + followers.join('\n') : 'No active copy followers.'}\nThis order uses real funds. Follower quantities remain subject to lot-size validation.` });
+}
+function captureMappingDraft() {
+  document.querySelectorAll('#mappings-list tr').forEach((row, index) => {
+    const source = row.querySelector('.mapping-master');
+    if (source && mappings[index]) mappings[index] = { masterId: source.value, childId: row.querySelector('.mapping-child').value, multiplier: Number(row.querySelector('.mapping-multiplier').value), active: row.querySelector('.mapping-active').checked };
+  });
+}
+function executionLabel(status) {
+  return ({ QUEUED: 'Waiting to submit', PROCESSING: 'Submitting', ACCEPTED: 'Accepted · awaiting fill', COMPLETED: 'Filled', FAILED: 'Failed or cancelled', EXPIRED: 'Expired before submission', RECONCILE_REQUIRED: 'Broker check required' })[status] || 'Status unavailable';
+}
+function renderExecutionQueue(jobs) {
+  recentExecutionJobs = jobs;
+  const copiedCount = document.getElementById('stat-copied-trades');
+  if (copiedCount) copiedCount.textContent = jobs.filter(job => job.metadata?.trackingKey && job.status === 'COMPLETED').length;
+  const failures = jobs.filter(job => ['FAILED', 'EXPIRED', 'RECONCILE_REQUIRED'].includes(job.status));
+  const pending = jobs.filter(job => ['QUEUED', 'PROCESSING', 'ACCEPTED'].includes(job.status));
+  const health = document.getElementById('copy-health');
+  if (health) health.innerHTML = `<div><h3>${failures.length ? `${failures.length} recent orders need review` : pending.length ? `${pending.length} orders in progress` : 'Order activity'}</h3><p>${failures.length ? 'Review the broker status and any partial fills before retrying.' : jobs.length ? 'Open Orders to review source and follower execution.' : 'No orders yet. Your source trades and follower outcomes will appear here.'}</p></div><button class="btn ${failures.length ? 'btn-primary' : 'btn-secondary'}" onclick="switchTab('orders')">Review orders</button>`;
+  if (health) health.classList.toggle('needs-attention', failures.length > 0);
+  const panel = document.getElementById('execution-queue');
+  if (!panel) return;
+  // Preserve keyboard focus and expanded groups while polling unchanged results.
+  const signature = JSON.stringify([jobs, accounts.map(account => [account.id, account.name, account.isSimulated])]);
+  if (panel.dataset.signature === signature) return;
+  panel.dataset.signature = signature;
+  panel.innerHTML = `<div class="section-actions"><div><h2>Execution activity</h2><p>Recent source and follower orders · ${jobs.length} records</p></div><button class="btn btn-secondary" onclick="restoreOrderMonitoring()">Refresh</button></div>`;
+  if (!jobs.length) { panel.insertAdjacentHTML('beforeend', '<p class="empty-state">No orders submitted yet. Start in Paper Practice or choose an instrument in your Watchlist.</p>'); return; }
+  const groups = new Map();
+  const jobKey = job => job.metadata?.trackingKey || (job.result?.brokerOrderId ? `${job.targetId}_${job.result.brokerOrderId}` : job.id);
+  for (const job of jobs) {
+    const key = jobKey(job);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(job);
+  }
+  for (const entries of groups.values()) {
+    const group = document.createElement('article'); group.className = 'execution-group';
+    const source = entries.find(job => !job.metadata?.trackingKey);
+    const heading = document.createElement('h3');
+    heading.textContent = `${entries[0].tradeParams.tradingsymbol} · ${source ? 'Source and follower activity' : 'Copied from broker order ' + (entries[0].metadata?.masterOrderId || 'unavailable')}`;
+    group.appendChild(heading);
+    for (const job of entries.sort((a, b) => Number(!!a.metadata?.trackingKey) - Number(!!b.metadata?.trackingKey))) {
+      const account = accounts.find(account => account.id === job.targetId);
+      const attention = ['FAILED', 'EXPIRED', 'RECONCILE_REQUIRED'].includes(job.status);
+      const row = document.createElement('div'); row.className = 'execution-row' + (attention ? ' needs-attention' : '');
+      const filled = Number(job.result?.filledQuantity || 0);
+      row.innerHTML = `<div><strong>${job.metadata?.trackingKey ? 'Follower' : 'Source / direct'} · ${escapeHtml(account?.name || 'Removed account')}</strong><span class="mode-pill">${account ? account.isSimulated ? 'Paper' : 'Live' : 'Account unavailable'}</span><p>${escapeHtml(job.tradeParams.transactiontype)} ${job.tradeParams.quantity} units · Filled ${filled} · ${escapeHtml(new Date(job.createdAt).toLocaleString())}</p></div><span class="execution-status">${executionLabel(job.status)}</span>${job.error ? `<p class="execution-error">${escapeHtml(job.error)}</p>` : ''}`;
+      if (job.status === 'RECONCILE_REQUIRED' || (attention && filled > 0)) row.insertAdjacentHTML('beforeend', '<p class="execution-next">Check the broker order book and position. Do not resubmit until the actual filled quantity is confirmed.</p>');
+      else if (['FAILED', 'EXPIRED'].includes(job.status)) {
+        const retry = document.createElement('button'); retry.className = 'btn btn-secondary'; retry.textContent = 'Review retry';
+        retry.onclick = () => openActionDialog({ title: 'Review order retry', description: `${account?.name || job.targetId} · ${account?.isSimulated ? 'Paper' : 'Live'}\n${job.tradeParams.transactiontype} ${job.tradeParams.quantity} × ${job.tradeParams.tradingsymbol}\n${job.tradeParams.ordertype} · ₹${job.tradeParams.price}\nOriginal quantity and price will be reused. The server checks that there were no partial fills.`, submitLabel: 'Retry order', onSubmit: async () => {
+          const response = await fetch(API_BASE + '/queue/jobs/' + encodeURIComponent(job.id) + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirmed: true }) });
+          const result = await response.json(); if (!response.ok) throw new Error(result.error || 'Retry refused');
+          monitorOrder(job.id); restoreOrderMonitoring();
+        }});
+        row.appendChild(retry);
+      }
+      group.appendChild(row);
+    }
+    if (source && source.status !== 'COMPLETED') group.insertAdjacentHTML('beforeend', '<p class="feature-note">Follower orders are created from confirmed source fills. Acceptance is not a fill.</p>');
+    panel.appendChild(group);
+  }
+}
+function setupUx() {
+  const passwordToggle = document.getElementById('toggle-admin-password');
+  passwordToggle?.addEventListener('click', () => {
+    const input = document.getElementById('admin-password');
+    const visible = input.type === 'password';
+    input.type = visible ? 'text' : 'password';
+    passwordToggle.setAttribute('aria-pressed', String(visible));
+    passwordToggle.setAttribute('aria-label', visible ? 'Hide password' : 'Show password');
+    passwordToggle.title = visible ? 'Hide password' : 'Show password';
+  });
+  document.querySelectorAll('.btn-close').forEach(button => button.setAttribute('aria-label', 'Close'));
+  document.querySelectorAll('input, select').forEach(field => field.addEventListener('input', () => {
+    if (field.hasAttribute('aria-invalid')) { document.getElementById(field.getAttribute('aria-errormessage'))?.remove(); field.removeAttribute('aria-invalid'); field.removeAttribute('aria-errormessage'); }
+  }));
+}
+
 // Firebase Auth State
 let firebaseInitialized = false;
 let confirmationResult = null;
@@ -278,10 +480,12 @@ async function initFirebase() {
     if (config.apiKey && typeof firebase !== 'undefined') {
       firebase.initializeApp(config);
       firebaseInitialized = true;
+      document.getElementById('auth-google-section').hidden = false;
     }
   } catch (error) { console.warn('Google sign-in is unavailable'); }
 }
 function showLogin() {
+  stopHealthPolling();
   localStorage.removeItem('currentUser');
   for (const timer of [logPoller, pricePoller, portfolioPoller]) clearInterval(timer);
   logPoller = pricePoller = portfolioPoller = null;
@@ -293,6 +497,7 @@ function showLogin() {
 }
 document.addEventListener('DOMContentLoaded', async () => {
   setupTabs();
+  setupUx();
   setupMobileNav();
   setupEventListeners();
   setupPullToRefresh();
@@ -339,6 +544,7 @@ function loginUser(user) {
   startLogPolling();
   startPricePolling();
   restoreOrderMonitoring();
+  startHealthPolling();
 }
 window.handleLogout = async function() {
   if (!confirm('Log out?')) return;
@@ -385,6 +591,7 @@ function setupMobileNav() {
 
 function switchTab(tabId) {
   activeTab = tabId;
+  if (tabId === 'orders') restoreOrderMonitoring();
 
   // Hide global positions total bar when leaving orders tab
   if (tabId !== 'orders') {
@@ -401,7 +608,9 @@ function switchTab(tabId) {
 
   // Update mobile bottom bar buttons
   document.querySelectorAll('.mobile-nav-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.getAttribute('data-tab') === tabId);
+    const selected = btn.getAttribute('data-tab') === tabId || (btn.getAttribute('data-tab') === 'more' && ['accounts', 'portfolio', 'simulator'].includes(tabId));
+    btn.classList.toggle('active', selected);
+    btn.setAttribute('aria-current', selected ? 'page' : 'false');
   });
   
   // Update contents
@@ -444,17 +653,10 @@ function switchTab(tabId) {
 function relocateElements() {
   const isMobile = window.innerWidth <= 768;
 
-  // 1. Watchlist Card relocation
+  // Keep the watchlist in the same destination at every screen size.
   const watchlistCard = document.getElementById('watchlist-card');
-  const desktopWatchlist = document.getElementById('desktop-watchlist-container');
-  const mobileWatchlist = document.getElementById('mobile-watchlist-container');
-  if (watchlistCard) {
-    if (isMobile && mobileWatchlist && watchlistCard.parentElement !== mobileWatchlist) {
-      mobileWatchlist.appendChild(watchlistCard);
-    } else if (!isMobile && desktopWatchlist && watchlistCard.parentElement !== desktopWatchlist) {
-      desktopWatchlist.appendChild(watchlistCard);
-    }
-  }
+  const watchlistPage = document.getElementById('mobile-watchlist-container');
+  if (watchlistCard && watchlistPage && watchlistCard.parentElement !== watchlistPage) watchlistPage.appendChild(watchlistCard);
 
   // 3. Pending Orders Card relocation
   const pendingCard = document.getElementById('pending-orders-card');
@@ -817,7 +1019,7 @@ function setupEventListeners() {
           pollWatchlistPrices();
           renderSearchSuggestions();
         } else {
-          alert('Failed to add symbol.');
+          showNotification('Failed to add symbol.');
         }
       } catch (err) {
         console.error('Failed to add watchlist symbol:', err);
@@ -1032,6 +1234,7 @@ async function loadData() {
     
     const mapResponse = await fetch(`${API_BASE}/mappings`);
     mappings = await mapResponse.json();
+    savedCopyLinks = mappings.map(link => ({ ...link }));
 
     try {
       const grpResponse = await fetch(`${API_BASE}/groups`);
@@ -1047,6 +1250,7 @@ async function loadData() {
     renderAccounts();
     renderGroups();
     renderOverviewStats();
+    renderSetupGuide();
     renderTopologyMap();
     renderQuickStatusList();
     renderMappingsTable();
@@ -1055,6 +1259,7 @@ async function loadData() {
     renderWatchlistTable();
     fetchLogs();
   } catch (error) {
+    showNotification('Could not load accounts and copy settings. Check the server connection and refresh.', 'error');
     console.error('Error loading config:', error);
   }
 }
@@ -1063,7 +1268,7 @@ async function loadData() {
 function renderOverviewStats() {
   const totalAcc = accounts.length;
   const connectedAcc = accounts.filter(a => a.connected).length;
-  const activeMappings = mappings.filter(m => m.active).length;
+  const activeMappings = savedCopyLinks.filter(m => m.active).length;
 
   document.getElementById('stat-masters').textContent = totalAcc;
   document.getElementById('stat-children').textContent = connectedAcc;
@@ -1277,10 +1482,12 @@ function renderAccounts() {
       ${actionsHtml}
     `;
 
+    card.id = 'account-card-' + acc.id;
     // Connect button click
     card.querySelector('.btn-connect').addEventListener('click', async (e) => {
       const btn = e.currentTarget;
       const originalText = btn.innerHTML;
+      clearFormErrors(card.id);
       btn.disabled = true;
       btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Connecting...';
 
@@ -1291,12 +1498,12 @@ function renderAccounts() {
           acc.connected = res.connected;
           loadData(); // Reload stats and items
         } else {
-          alert('Failed to connect: please verify API credentials, secrets, or TOTP keys.');
+          setFormError(card.id, res.error || 'Connection failed. Check credentials and broker session settings, then connect again.');
           btn.disabled = false;
           btn.innerHTML = originalText;
         }
       } catch (err) {
-        alert('Server connection error.');
+        setFormError(card.id, 'Cannot reach the server. Try connecting again when the server is available.');
         btn.disabled = false;
         btn.innerHTML = originalText;
       }
@@ -1306,30 +1513,12 @@ function renderAccounts() {
     const rechargeBtn = card.querySelector('.btn-recharge');
     if (rechargeBtn) {
       rechargeBtn.addEventListener('click', async () => {
-        const amountStr = prompt(`Enter new balance amount for simulated account "${escapeHtml(acc.name)}":`, acc.balance || '1000000');
-        if (amountStr === null) return; // Cancelled
-        const amount = parseFloat(amountStr);
-        if (isNaN(amount) || amount < 0) {
-          alert('Please enter a valid positive number.');
-          return;
-        }
-        
-        try {
-          const response = await fetch(`${API_BASE}/accounts/${acc.id}/recharge`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ amount })
-          });
-          const res = await response.json();
-          if (res.success) {
-            alert(`Balance successfully updated to ₹${parseFloat(res.balance).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`);
-            loadData();
-          } else {
-            alert('Failed to update balance: ' + (res.error || 'Unknown error'));
-          }
-        } catch (err) {
-          alert('Network error while updating balance.');
-        }
+        await openActionDialog({ title: 'Set paper balance', description: acc.name + ' / simulated funds only', submitLabel: 'Save paper balance', fields: [{ name: 'amount', label: 'Paper balance (INR)', value: acc.balance || 1000000, min: 0, step: 'any' }], onSubmit: async values => {
+          const response = await fetch(`${API_BASE}/accounts/${acc.id}/recharge`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount: Number(values.amount) }) });
+          const result = await response.json();
+          if (!response.ok || !result.success) throw new Error(result.error || 'Could not update paper balance.');
+          showNotification('Paper balance updated.'); loadData();
+        }});
       });
     }
 
@@ -1535,6 +1724,7 @@ function editAccount(acc) {
 async function handleAccountSubmit(e) {
   e.preventDefault();
   
+  clearFormErrors('account-form');
   const broker = document.getElementById('acc-broker').value;
   const isSimulated = document.getElementById('acc-is-simulated').checked;
 
@@ -1600,10 +1790,11 @@ async function handleAccountSubmit(e) {
       hideAccountForm();
       loadData();
     } else {
-      alert('Error saving account configuration.');
+      const result = await response.json();
+      setFormError('account-form', result.error || 'Could not save account. Check the fields and try again.');
     }
   } catch (err) {
-    alert('Network error while saving account.');
+    setFormError('account-form', 'Cannot reach the server. Your entries have been kept. Try saving again when connected.');
   }
 }
 
@@ -1654,7 +1845,7 @@ async function openPnlReportModal(accountId) {
     
     document.getElementById('pnl-report-modal').classList.remove('hidden');
   } catch (err) {
-    alert('Error fetching P&L report: ' + err.message);
+    showNotification('Error fetching P&L report: ' + err.message);
   }
 }
 
@@ -1675,9 +1866,9 @@ function renderMappingsTable() {
 
   if (mappings.length === 0) {
     container.innerHTML = `
-      <tr>
+      <tr class="mapping-empty">
         <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 30px 0;">
-          No copy mappings configured. Add a row to define linked accounts.
+          No copy links yet. Add a source and follower to get started.
         </td>
       </tr>
     `;
@@ -1688,33 +1879,33 @@ function renderMappingsTable() {
     const tr = document.createElement('tr');
     
     // Master Selection
-    let masterSelect = `<select class="table-select mapping-master" data-index="${index}">`;
+    let masterSelect = `<select aria-label="Source account" class="table-select mapping-master" data-index="${index}">`;
     masterOptions.forEach(m => {
-      masterSelect += `<option value="${m.id}" ${mapping.masterId === m.id ? 'selected' : ''}>${m.name}</option>`;
+      masterSelect += `<option value="${escapeHtml(m.id)}" ${mapping.masterId === m.id ? 'selected' : ''}>${escapeHtml(m.name)} (${m.isSimulated ? 'Paper' : 'Live'})</option>`;
     });
     masterSelect += `</select>`;
 
     // Child Selection
-    let childSelect = `<select class="table-select mapping-child" data-index="${index}">`;
+    let childSelect = `<select aria-label="Follower account" class="table-select mapping-child" data-index="${index}">`;
     childOptions.forEach(c => {
-      childSelect += `<option value="${c.id}" ${mapping.childId === c.id ? 'selected' : ''}>${c.name}</option>`;
+      childSelect += `<option value="${escapeHtml(c.id)}" ${mapping.childId === c.id ? 'selected' : ''}>${escapeHtml(c.name)} (${c.isSimulated ? 'Paper' : 'Live'})</option>`;
     });
     childSelect += `</select>`;
 
     tr.innerHTML = `
-      <td>${masterSelect}</td>
-      <td>${childSelect}</td>
-      <td>
-        <input type="number" class="table-input mapping-multiplier" step="0.1" min="0.1" value="${mapping.multiplier}" data-index="${index}">
+      <td data-label="Source account">${masterSelect}</td>
+      <td data-label="Follower account">${childSelect}</td>
+      <td data-label="Quantity multiplier">
+        <input aria-label="Quantity multiplier" type="number" class="table-input mapping-multiplier" step="0.1" min="0.1" value="${mapping.multiplier}" data-index="${index}">
       </td>
-      <td>
+      <td data-label="Enable copying">
         <label class="switch">
-          <input type="checkbox" class="mapping-active" ${mapping.active ? 'checked' : ''} data-index="${index}">
+          <input type="checkbox" aria-label="Enable this copy link" class="mapping-active" ${mapping.active ? 'checked' : ''} data-index="${index}">
           <span class="slider"></span>
         </label>
       </td>
       <td>
-        <button class="btn btn-icon btn-delete-mapping" data-index="${index}" title="Remove linkage">
+        <button class="btn btn-icon btn-delete-mapping" data-index="${index}" title="Remove copy link">
           <i class="fa-solid fa-trash-can" style="color: var(--red);"></i>
         </button>
       </td>
@@ -1722,6 +1913,7 @@ function renderMappingsTable() {
 
     tr.querySelector('.btn-delete-mapping').addEventListener('click', (e) => {
       const idx = parseInt(e.currentTarget.getAttribute('data-index'));
+      captureMappingDraft();
       mappings.splice(idx, 1);
       renderMappingsTable();
     });
@@ -1731,8 +1923,9 @@ function renderMappingsTable() {
 }
 
 function addMappingRow() {
-  if (accounts.length === 0) {
-    alert('Please configure at least one account before creating mappings.');
+  captureMappingDraft();
+  if (accounts.length < 2) {
+    showNotification('Add at least two accounts before creating a copy link.', 'error');
     return;
   }
 
@@ -1740,13 +1933,14 @@ function addMappingRow() {
     masterId: accounts[0].id,
     childId: accounts[1] ? accounts[1].id : accounts[0].id,
     multiplier: 1.0,
-    active: true
+    active: false
   });
 
   renderMappingsTable();
 }
 
 async function saveMappings() {
+  clearFormErrors('tab-mappings');
   // Read inputs from DOM to update mappings list
   const rows = document.querySelectorAll('#mappings-list tr');
   const updatedMappings = [];
@@ -1761,12 +1955,24 @@ async function saveMappings() {
       updatedMappings.push({
         masterId: masterSelect.value,
         childId: childSelect.value,
-        multiplier: parseFloat(multiplierInput.value) || 1.0,
+        multiplier: Number(multiplierInput.value),
         active: activeCheck.checked
       });
     }
   });
 
+  for (const link of updatedMappings) {
+    if (link.masterId === link.childId) return setFormError('tab-mappings', 'Choose different source and follower accounts.');
+    if (!Number.isFinite(link.multiplier) || link.multiplier <= 0 || link.multiplier > 100) return setFormError('tab-mappings', 'Enter a multiplier greater than zero and at most 100.');
+    const source = accounts.find(account => account.id === link.masterId);
+    const follower = accounts.find(account => account.id === link.childId);
+    if (source?.isSimulated && !follower?.isSimulated) return setFormError('tab-mappings', 'A paper source can only copy to paper followers. Choose a paper follower or a live source.');
+  }
+  const liveChanges = updatedMappings.filter(link => link.active && !accounts.find(account => account.id === link.childId)?.isSimulated && !savedCopyLinks.some(saved => saved.active && saved.masterId === link.masterId && saved.childId === link.childId && saved.multiplier === link.multiplier));
+  if (liveChanges.length) {
+    const description = liveChanges.map(link => `${accounts.find(account => account.id === link.masterId)?.name} → ${accounts.find(account => account.id === link.childId)?.name}: ${link.multiplier}× (10 source units → ${10 * link.multiplier} follower units)`).join('\n');
+    if (!await openActionDialog({ title: 'Enable live copying', description: description + '\n\nThese followers use real funds. Confirm the multipliers; quantities must also meet each instrument’s lot size.', submitLabel: 'Enable and save' })) return;
+  }
   try {
     const response = await fetch(`${API_BASE}/mappings`, {
       method: 'POST',
@@ -1776,14 +1982,17 @@ async function saveMappings() {
 
     if (response.ok) {
       mappings = updatedMappings;
+      savedCopyLinks = updatedMappings.map(link => ({ ...link }));
       renderOverviewStats();
       renderTopologyMap();
-      alert('Mappings saved successfully!');
+      renderSetupGuide();
+      showNotification('Copy setup saved.');
     } else {
-      alert('Error saving mappings to server.');
+      const result = await response.json();
+      setFormError('tab-mappings', result.error || 'Could not save copy setup.');
     }
   } catch (err) {
-    alert('Connection failure saving mappings.');
+    showNotification('Cannot reach the server. Your copy setup is still on this page.');
   }
 }
 
@@ -1846,7 +2055,7 @@ window.renderGroups = function() {
       </div>
       
       <div style="border-top: 1px solid var(--border-color); padding-top: 12px;">
-        <span style="font-size: 11px; color: var(--text-muted); font-weight: 600; display: block; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">Child Account</span>
+        <span style="font-size: 11px; color: var(--text-muted); font-weight: 600; display: block; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">Follower Account</span>
         ${childrenHtml}
       </div>
       
@@ -1902,7 +2111,7 @@ function populateGroupMasterSelect(selectedMasterId) {
     const opt = document.createElement('option');
     opt.value = acc.id;
     const brokerPretty = acc.broker === 'angel_one' ? 'Angel' : (acc.broker === 'dhan' ? 'Dhan' : 'Motilal');
-    opt.textContent = `${acc.name} [${brokerPretty}]`;
+    opt.textContent = `${acc.name} [${acc.isSimulated ? 'Paper' : 'Live'} / ${brokerPretty}]`;
     if (acc.id === selectedMasterId) {
       opt.selected = true;
     }
@@ -1910,7 +2119,7 @@ function populateGroupMasterSelect(selectedMasterId) {
   });
   
   if (connectedMasters.length === 0) {
-    select.innerHTML = '<option value="">No connected accounts available</option>';
+    select.innerHTML = '<option value="">No connected accounts</option>';
   }
 }
 
@@ -1976,13 +2185,13 @@ window.saveGroup = async function() {
   const nameInput = document.getElementById('group-name');
   const name = nameInput.value.trim();
   if (!name) {
-    alert('Please enter a group name.');
+    showNotification('Please enter a group name.');
     return;
   }
   
   const masterId = document.getElementById('group-master').value;
   if (!masterId) {
-    alert('Please select a master account.');
+    showNotification('Please select a master account.');
     return;
   }
   
@@ -2001,7 +2210,7 @@ window.saveGroup = async function() {
   });
   
   if (children.length === 0) {
-    alert('Please select at least one child account.');
+    showNotification('Please select at least one child account.');
     return;
   }
   
@@ -2045,10 +2254,10 @@ window.saveGroup = async function() {
       closeGroupModal();
       showNotification(isEdit ? 'Group updated successfully!' : 'Group created successfully!', 'success');
     } else {
-      alert('Failed to save group configuration.');
+      showNotification('Failed to save group configuration.');
     }
   } catch (err) {
-    alert('Network error saving group.');
+    showNotification('Network error saving group.');
   }
 };
 
@@ -2075,10 +2284,10 @@ window.deleteGroup = async function(groupId) {
       renderMappingsTable();
       showNotification('Group deleted successfully.', 'success');
     } else {
-      alert('Failed to delete group.');
+      showNotification('Failed to delete group.');
     }
   } catch (err) {
-    alert('Network error deleting group.');
+    showNotification('Network error deleting group.');
   }
 };
 
@@ -2108,7 +2317,7 @@ window.toggleGroupActive = async function(groupId, isActive) {
       renderMappingsTable();
       showNotification(isActive ? 'Group activated.' : 'Group deactivated.', 'success');
     } else {
-      alert('Failed to toggle group status.');
+      showNotification('Failed to toggle group status.');
     }
   } catch (err) {
     console.error('Network error toggling group active state:', err);
@@ -2120,9 +2329,9 @@ function populateSimulatorDropdowns() {
   const select = document.getElementById('sim-master');
   select.innerHTML = '';
 
-  const connectedMasters = accounts.filter(acc => acc.connected === true);
+  const connectedMasters = accounts.filter(acc => acc.connected === true && acc.isSimulated === true);
   if (connectedMasters.length === 0) {
-    select.innerHTML = '<option value="">No connected accounts available</option>';
+    select.innerHTML = '<option value="">Connect a paper account in Accounts to practice</option>';
     return;
   }
 
@@ -2130,7 +2339,7 @@ function populateSimulatorDropdowns() {
     const opt = document.createElement('option');
     opt.value = m.id;
     const brokerPretty = m.broker === 'angel_one' ? 'Angel' : (m.broker === 'dhan' ? 'Dhan' : 'Motilal');
-    opt.textContent = `${m.name} [${brokerPretty}]`;
+    opt.textContent = `${m.name} [Paper · ${brokerPretty}]`;
     select.appendChild(opt);
   });
 }
@@ -2140,13 +2349,15 @@ async function handleSimulatorSubmit(e) {
 
   const masterId = document.getElementById('sim-master').value;
   if (!masterId) {
-    alert('Please select a Master account to execute order.');
+    setFormError('simulator-form', 'Choose a connected paper account. Add or connect one in Accounts.');
     return;
   }
 
+  clearFormErrors('simulator-form');
+  if (!accounts.find(account => account.id === masterId && account.isSimulated)) return setFormError('simulator-form', 'Paper Practice only accepts paper accounts.');
   const btn = document.getElementById('btn-execute-simulation');
   btn.disabled = true;
-  btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Executing copy loop...';
+  btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Submitting paper order...';
 
   const transactiontype = document.querySelector('input[name="sim-side"]:checked').value;
   const ordertype = document.getElementById('sim-type').value;
@@ -2165,7 +2376,7 @@ async function handleSimulatorSubmit(e) {
 
   payload.requestId = getOrderRequestId(payload);
   try {
-    const response = await fetch(`${API_BASE}/execute-trade`, {
+    const response = await fetch(`${API_BASE}/paper/execute-trade`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -2175,25 +2386,25 @@ async function handleSimulatorSubmit(e) {
       const data = await response.json();
       if (data.success === false) {
         const errorMsg = data.error || (data.masterResponse && data.masterResponse.message) || 'Unknown broker error';
-        alert(`Order Placement Failed: ${errorMsg}`);
+        setFormError('simulator-form', errorMsg);
         btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Execute Order & Copy';
+        btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Place Paper Order';
         return;
       }
       clearOrderRequestId();
       monitorOrder(data.jobId);
       btn.disabled = false;
-      btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Execute Order & Copy';
+      btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Place Paper Order';
     } else {
       const err = await response.json();
-      alert(`Execution Error: ${err.error || err.message || 'Server error'}`);
+      setFormError('simulator-form', err.error || err.message || 'Order could not be submitted.');
       btn.disabled = false;
-      btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Execute Order & Copy';
+      btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Place Paper Order';
     }
   } catch (err) {
-    alert('Execution request failed.');
+    setFormError('simulator-form', 'Could not confirm submission. Check Orders before submitting again.');
     btn.disabled = false;
-    btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Execute Order & Copy';
+    btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Place Paper Order';
   }
 }
 
@@ -2289,13 +2500,13 @@ function populatePortfolioDropdown() {
   if (select) {
     select.innerHTML = '';
     if (connectedAccounts.length === 0) {
-      select.innerHTML = '<option value="">No connected accounts available</option>';
+      select.innerHTML = '<option value="">No connected accounts</option>';
     } else {
       connectedAccounts.forEach(acc => {
         const opt = document.createElement('option');
         opt.value = acc.id;
         const brokerPretty = acc.broker === 'angel_one' ? 'Angel' : (acc.broker === 'dhan' ? 'Dhan' : 'Motilal');
-        opt.textContent = `${acc.name} [${brokerPretty}]`;
+        opt.textContent = `${acc.name} [${acc.isSimulated ? 'Paper' : 'Live'} / ${brokerPretty}]`;
         if (acc.id === currentSelection) {
           opt.selected = true;
         }
@@ -2307,13 +2518,13 @@ function populatePortfolioDropdown() {
   if (orderSelect) {
     orderSelect.innerHTML = '';
     if (connectedAccounts.length === 0) {
-      orderSelect.innerHTML = '<option value="">No connected accounts available</option>';
+      orderSelect.innerHTML = '<option value="">No connected accounts</option>';
     } else {
       connectedAccounts.forEach(acc => {
         const opt = document.createElement('option');
         opt.value = acc.id;
         const brokerPretty = acc.broker === 'angel_one' ? 'Angel' : (acc.broker === 'dhan' ? 'Dhan' : 'Motilal');
-        opt.textContent = `${acc.name} [${brokerPretty}]`;
+        opt.textContent = `${acc.name} [${acc.isSimulated ? 'Paper' : 'Live'} / ${brokerPretty}]`;
         if (acc.id === currentSelection) {
           opt.selected = true;
         }
@@ -2624,17 +2835,17 @@ async function refreshPortfolio(isBackground = false) {
               if (res.ok) {
                 const resData = await res.json();
                 if (resData.status === true || resData.status === 'SUCCESS' || resData.success === true) {
-                  alert('Order cancelled successfully!');
+                  showNotification('Order cancelled successfully!');
                   refreshPortfolio();
                   fetchLogs();
                 } else {
-                  alert('Cancellation failed: ' + (resData.message || resData.error || 'Broker API error'));
+                  showNotification('Cancellation failed: ' + (resData.message || resData.error || 'Broker API error'));
                 }
               } else {
-                alert('Error cancelling order.');
+                showNotification('Error cancelling order.');
               }
             } catch (err) {
-              alert('Error: ' + err.message);
+              showNotification('Error: ' + err.message);
             }
           }
         });
@@ -2814,53 +3025,21 @@ function updateLiveHoldingsPrices() {
   }
 }
 
-async function handleModifyOrder(o, accountId) {
-  const currentQty = o.quantity;
-  const currentPrice = o.price;
-  
-  const newQtyStr = prompt(`Modify Order ${escapeHtml(o.orderid)} (${escapeHtml(o.tradingsymbol)})\nEnter new quantity:`, currentQty);
-  if (newQtyStr === null) return; 
-  const newQty = parseInt(newQtyStr);
-  if (isNaN(newQty) || newQty <= 0) {
-    alert('Invalid quantity.');
-    return;
-  }
-  
-  const newPriceStr = prompt(`Modify Order ${escapeHtml(o.orderid)} (${escapeHtml(o.tradingsymbol)})\nEnter new price:`, currentPrice);
-  if (newPriceStr === null) return; 
-  const newPrice = parseFloat(newPriceStr);
-  if (isNaN(newPrice) || newPrice < 0) {
-    alert('Invalid price.');
-    return;
-  }
-  
-  try {
-    const response = await fetch(`${API_BASE}/orders/modify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        accountId,
-        orderid: o.orderid,
-        quantity: newQty,
-        price: newPrice,
-        ordertype: o.ordertype,
-        symboltoken: o.symboltoken,
-        exchange: o.exchange,
-        producttype: o.producttype
-      })
-    });
-    
-    const resData = await response.json();
-    if (response.ok && (resData.status === true || resData.status === 'SUCCESS' || resData.success === true)) {
-      alert('Order modified successfully!');
-      refreshPortfolio();
-      fetchLogs();
-    } else {
-      alert('Order modification failed: ' + (resData.error || resData.message || 'Unknown error'));
+async function handleModifyOrder(order, accountId) {
+  await openActionDialog({
+    title: 'Modify order', description: `${order.tradingsymbol} · Order ${order.orderid}. Changes are sent to the selected account's broker.`,
+    submitLabel: 'Save order changes', fields: [
+      { name: 'quantity', label: 'Total quantity (whole units)', value: order.quantity, min: 1, step: 1 },
+      { name: 'price', label: 'Price (₹)', value: order.price, min: order.ordertype === 'LIMIT' ? 0.01 : 0, step: 'any' }
+    ], onSubmit: async values => {
+      if (!Number.isSafeInteger(Number(values.quantity))) throw new Error('Quantity must be a positive whole number.');
+      const response = await fetch(`${API_BASE}/orders/modify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountId, orderid: order.orderid, quantity: Number(values.quantity), price: Number(values.price), ordertype: order.ordertype, symboltoken: order.symboltoken, exchange: order.exchange, producttype: order.producttype }) });
+      const result = await response.json();
+      if (!response.ok || !(result.status === true || result.status === 'SUCCESS' || result.success === true)) throw new Error(result.error || result.message || 'Could not modify order.');
+      showNotification('Order changes accepted. Check Orders for the broker status.');
+      refreshPortfolio(); fetchLogs();
     }
-  } catch (err) {
-    alert('Error modifying order: ' + err.message);
-  }
+  });
 }
 
 function toTitleCase(str) {
@@ -3200,7 +3379,7 @@ async function handleAddWatchlist() {
       renderWatchlistTable();
       pollWatchlistPrices(); // Fetch prices immediately for new item
     } else {
-      alert('Failed to add symbol.');
+      showNotification('Failed to add symbol.');
     }
   } catch (err) {
     console.error('Error adding watchlist item:', err);
@@ -3220,15 +3399,17 @@ function handleWatchlistPricesData(data) {
       marketStatusBadge.className = 'text-green';
       marketStatusBadge.style.fontWeight = '600';
     } else {
-      marketStatusBadge.textContent = 'Scheduled closed — check quote timestamps';
-      marketStatusBadge.className = 'text-red';
+      marketStatusBadge.textContent = 'Scheduled closed';
+      marketStatusBadge.className = 'text-muted';
       marketStatusBadge.style.fontWeight = '600';
     }
   }
 
   const lastTickEl = document.getElementById('watchlist-last-tick');
   if (lastTickEl) {
-    lastTickEl.textContent = new Date().toLocaleTimeString();
+    const timestamps = Object.values(prices).filter(quote => Number(quote.ltp) > 0 && quote.updatedAt).map(quote => new Date(quote.updatedAt).getTime()).filter(Number.isFinite);
+    latestQuoteAt = timestamps.length ? Math.max(...timestamps) : null;
+    renderQuoteFreshness();
   }
 
   for (const symbol in prices) {
@@ -3345,12 +3526,13 @@ function handleWatchlistPricesData(data) {
     const change = document.getElementById('index-' + label + '-change');
     if (price) {
       price.textContent = quote.ltp > 0 ? quote.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (quote.quoteStatus === 'stale' ? ' (stale)' : '') : 'Unavailable';
+      price.className = 'index-ltp ' + (quote.ltp > 0 && quote.isLive ? 'text-primary' : 'text-muted');
       price.title = quote.updatedAt ? 'Quote received: ' + new Date(quote.updatedAt).toLocaleString() : 'No verified quote';
     }
     if (change) {
       const difference = quote.ltp - quote.prevClose;
       change.textContent = quote.ltp > 0 && quote.prevClose > 0 ? difference.toFixed(2) + ' (' + (difference / quote.prevClose * 100).toFixed(2) + '%)' : '—';
-      change.className = difference >= 0 ? 'index-change text-green' : 'index-change text-red';
+      change.className = !(quote.ltp > 0 && quote.prevClose > 0) ? 'index-change text-muted' : difference >= 0 ? 'index-change text-green' : 'index-change text-red';
     }
     if (quote.isLive && typeof window.updateLwChartLiveTick === 'function') window.updateLwChartLiveTick(symbol.replace('-EQ', ''), quote.ltp);
   }
@@ -4060,7 +4242,7 @@ function openOrderPlacement(side, stockInfo, price, isExit = false, positionQty 
     if (connectedAccounts.length === 0) {
       const opt = document.createElement('option');
       opt.value = '';
-      opt.textContent = 'No connected accounts available';
+      opt.textContent = 'No connected accounts';
       accSelect.appendChild(opt);
     } else {
       const defaultSelectedId = isExit ? accountId : connectedAccounts[0].id;
@@ -4069,7 +4251,7 @@ function openOrderPlacement(side, stockInfo, price, isExit = false, positionQty 
         const opt = document.createElement('option');
         opt.value = acc.id;
         const brokerPretty = acc.broker === 'angel_one' ? 'Angel' : (acc.broker === 'dhan' ? 'Dhan' : 'Motilal');
-        opt.textContent = `${acc.name} [${brokerPretty}]`;
+        opt.textContent = `${acc.name} [${acc.isSimulated ? 'Paper' : 'Live'} / ${brokerPretty}]`;
         if (acc.id === defaultSelectedId) {
           opt.selected = true;
         }
@@ -4105,6 +4287,8 @@ function openOrderPlacement(side, stockInfo, price, isExit = false, positionQty 
     changeEl.textContent = `(${isUp ? '+' : ''}${changePct.toFixed(2)}%)`;
   }
   
+  clearFormErrors('order-placement-modal');
+  updateOrderContext();
   // Set defaults
   document.getElementById('order-qty').value = isExit ? Math.abs(positionQty).toString() : String(stockInfo.lotSize || 1);
   document.getElementById('order-price').value = nsePrice.toFixed(2);
@@ -4112,7 +4296,7 @@ function openOrderPlacement(side, stockInfo, price, isExit = false, positionQty 
   // Update max quantity label text
   const maxQtyLabel = document.querySelector('.max-qty');
   if (maxQtyLabel) {
-    maxQtyLabel.innerHTML = isExit ? `Max Qty <span id="order-max-qty">${positionQty}</span>` : `Max Qty <span id="order-max-qty">999</span>`;
+    maxQtyLabel.innerHTML = isExit ? `Max Qty <span id="order-max-qty">${positionQty}</span>` : `Lot size <span id="order-max-qty">${stockInfo.lotSize || 1}</span>`;
   }
   
   // Setup button styling based on side / exit mode
@@ -4122,7 +4306,7 @@ function openOrderPlacement(side, stockInfo, price, isExit = false, positionQty 
       submitBtn.textContent = 'EXIT';
       submitBtn.className = 'btn btn-order-submit btn-sell'; // Force red exit button
     } else {
-      submitBtn.textContent = `PLACE ${side} ORDER`;
+      submitBtn.textContent = `${accounts.find(a => a.id === accSelect.value)?.isSimulated ? 'PLACE PAPER' : 'REVIEW LIVE'} ${side} ORDER`;
       submitBtn.className = `btn btn-order-submit ${side === 'BUY' ? 'btn-buy' : 'btn-sell'}`;
     }
   }
@@ -4325,7 +4509,8 @@ async function monitorOrder(jobId) {
       if (job.status !== lastStatus) {
         lastStatus = job.status;
         const failed = ['FAILED', 'EXPIRED', 'RECONCILE_REQUIRED'].includes(job.status);
-        showNotification(job.tradeParams.tradingsymbol + ': ' + job.status + (job.error ? ' — ' + job.error : ''), failed ? 'error' : 'info');
+        restoreOrderMonitoring();
+        showNotification(job.tradeParams.tradingsymbol + ': ' + executionLabel(job.status) + (job.error ? ' — ' + job.error : ''), failed ? 'error' : 'info');
       }
       if (['COMPLETED', 'FAILED', 'EXPIRED', 'RECONCILE_REQUIRED'].includes(job.status)) { refreshPortfolio(true); break; }
       await new Promise(resolve => setTimeout(resolve, 2000));
@@ -4336,53 +4521,17 @@ async function monitorOrder(jobId) {
 async function restoreOrderMonitoring() {
   try {
     const response = await fetch(API_BASE + '/queue/jobs');
-    if (!response.ok) return;
+    if (!response.ok) throw new Error('Cannot load order activity');
     const jobs = await response.json();
     renderExecutionQueue(jobs);
     for (const job of jobs.filter(entry => ['QUEUED', 'PROCESSING', 'ACCEPTED'].includes(entry.status))) monitorOrder(job.id);
-  } catch (error) { console.warn('Cannot load execution queue'); }
-}
-function renderExecutionQueue(jobs) {
-  let panel = document.getElementById('execution-queue');
-  if (!panel) {
-    panel = document.createElement('details');
-    panel.id = 'execution-queue';
-    panel.style.cssText = 'margin:12px;padding:12px;border:1px solid #444;border-radius:8px';
-    document.querySelector('.app-container')?.appendChild(panel);
-  }
-  panel.replaceChildren();
-  const heading = document.createElement('summary');
-  heading.textContent = 'Execution queue — ' + jobs.length + ' recent orders';
-  panel.appendChild(heading);
-  const refresh = document.createElement('button');
-  refresh.textContent = 'Refresh';
-  refresh.onclick = restoreOrderMonitoring;
-  panel.appendChild(refresh);
-  for (const job of jobs) {
-    const row = document.createElement('div');
-    row.style.cssText = 'padding:8px;border-bottom:1px solid #333';
-    row.textContent = job.tradeParams.tradingsymbol + ' × ' + job.tradeParams.quantity + ' • ' + job.status + (job.error ? ' • ' + job.error : '');
-    if (['FAILED', 'EXPIRED'].includes(job.status)) {
-      const retry = document.createElement('button');
-      retry.textContent = 'Review and retry';
-      retry.onclick = async () => {
-        if (!confirm('Retry this order at its original quantity and price? The server will refuse ambiguous or partially filled orders.')) return;
-        retry.disabled = true;
-        try {
-          const response = await fetch(API_BASE + '/queue/jobs/' + encodeURIComponent(job.id) + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirmed: true }) });
-          const result = await response.json();
-          if (!response.ok) throw new Error(result.error);
-          monitorOrder(job.id);
-          restoreOrderMonitoring();
-        } catch (error) { showNotification(error.message, 'error'); retry.disabled = false; }
-      };
-      row.appendChild(retry);
-    }
-    panel.appendChild(row);
+  } catch (error) {
+    const health = document.getElementById('copy-health');
+    if (health) health.textContent = 'Order activity is unavailable. Check the server connection before retrying an order.';
   }
 }
-
 async function submitPlacedOrder() {
+  clearFormErrors('order-placement-modal');
   const qtyInput = document.getElementById('order-qty');
   const priceInput = document.getElementById('order-price');
   
@@ -4390,25 +4539,25 @@ async function submitPlacedOrder() {
   
   const qty = Number(qtyInput.value);
   if (!Number.isSafeInteger(qty) || qty <= 0 || (isExitOrder && qty > Math.abs(exitPositionQty)) || qty % (currentSelectedStock.lotSize || 1) !== 0) {
-    alert('Please enter a valid quantity.');
+    setFormError('order-placement-modal', `Enter a positive whole quantity in multiples of ${currentSelectedStock.lotSize || 1}${isExitOrder ? ', no more than ' + Math.abs(exitPositionQty) : ''}.`, 'order-qty');
     return;
   }
   
   const price = parseFloat(priceInput.value) || 0;
   if (currentOrderMode === 'LIMIT' && price <= 0) {
-    alert('Please enter a valid limit price.');
+    setFormError('order-placement-modal', 'Enter a limit price greater than zero.', 'order-price');
     return;
   }
   
   const selectedAccId = document.getElementById('order-account-select').value;
   if (!selectedAccId) {
-    alert('Please select an account.');
+    setFormError('order-placement-modal', 'Choose an account for this order.', 'order-account-select');
     return;
   }
   
   const selectedAcc = accounts.find(a => a.id === selectedAccId);
   if (!selectedAcc) {
-    alert('Selected account not found.');
+    setFormError('order-placement-modal', 'This account is no longer available. Refresh Accounts before trading.');
     return;
   }
   
@@ -4435,6 +4584,11 @@ async function submitPlacedOrder() {
     price: currentOrderMode === 'LIMIT' ? price : 0
   };
   
+  payload.requestId = getOrderRequestId(payload);
+  if (!selectedAcc.isSimulated) {
+    const approved = await reviewLiveOrder(selectedAcc, payload);
+    if (!approved) { submitBtn.disabled = false; submitBtn.textContent = originalText; return; }
+  }
   try {
     const response = await fetch(`${API_BASE}/execute-trade`, {
       method: 'POST',
@@ -4445,14 +4599,14 @@ async function submitPlacedOrder() {
     if (response.ok) {
       const data = await response.json();
       
-      closeOrderPlacement();
+      if (data.success !== false) closeOrderPlacement();
       
       // Reset button state immediately since modal is closed
       submitBtn.disabled = false;
       submitBtn.textContent = originalText;
       
       if (data.success === false) {
-        showNotification(data.error || 'Unknown queue error', 'error');
+        setFormError('order-placement-modal', data.error || 'Order could not be queued.');
       } else {
         showNotification('Order queued; awaiting broker confirmation.', 'info');
         clearOrderRequestId();
@@ -4468,12 +4622,12 @@ async function submitPlacedOrder() {
       
     } else {
       const err = await response.json();
-      showNotification(`Order Placement Failed: ${err.error || 'Server error'}`, 'error');
+      setFormError('order-placement-modal', err.error || 'Order could not be placed.');
       submitBtn.disabled = false;
       submitBtn.textContent = originalText;
     }
   } catch (e) {
-    showNotification('Connection interrupted. Order status may be unknown; retrying the unchanged order uses the same request ID.', 'error');
+    setFormError('order-placement-modal', 'Connection interrupted. Check Orders for the broker outcome before retrying. Your entries have been kept.');
     submitBtn.disabled = false;
     submitBtn.textContent = originalText;
   }
@@ -4705,17 +4859,17 @@ function renderMobileOrders() {
               if (res.ok) {
                 const resData = await res.json();
                 if (resData.status === true || resData.status === 'SUCCESS' || resData.success === true) {
-                  alert('Order cancelled successfully!');
+                  showNotification('Order cancelled successfully!');
                   refreshPortfolio();
                   fetchLogs();
                 } else {
-                  alert('Cancellation failed: ' + (resData.message || resData.error || 'Broker API error'));
+                  showNotification('Cancellation failed: ' + (resData.message || resData.error || 'Broker API error'));
                 }
               } else {
-                alert('Error cancelling order.');
+                showNotification('Error cancelling order.');
               }
             } catch (err) {
-              alert('Error: ' + err.message);
+              showNotification('Error: ' + err.message);
             }
           }
         });
@@ -5093,14 +5247,14 @@ function renderLwCandleChart(candles) {
   
   lwChartObj = LightweightCharts.createChart(inner, {
     layout: {
-      backgroundColor: '#faf6ed',
-      textColor: '#57534e',
+      backgroundColor: '#0b1120',
+      textColor: '#b3c0d4',
       fontSize: 11,
-      fontFamily: 'Outfit, sans-serif'
+      fontFamily: 'Manrope, sans-serif'
     },
     grid: {
-      vertLines: { color: 'rgba(140, 133, 123, 0.06)' },
-      horzLines: { color: 'rgba(140, 133, 123, 0.06)' },
+      vertLines: { color: 'rgba(147, 164, 188, 0.10)' },
+      horzLines: { color: 'rgba(147, 164, 188, 0.10)' },
     },
     crosshair: {
       mode: LightweightCharts.CrosshairMode.Normal,
@@ -5556,17 +5710,17 @@ function renderMobileOrdersList(orders, containerId, isPending = false) {
               if (res.ok) {
                 const resData = await res.json();
                 if (resData.status === true || resData.status === 'SUCCESS' || resData.success === true) {
-                  alert('Order cancelled successfully!');
+                  showNotification('Order cancelled successfully!');
                   refreshPortfolio();
                   fetchLogs();
                 } else {
-                  alert('Cancellation failed: ' + (resData.message || resData.error || 'Broker API error'));
+                  showNotification('Cancellation failed: ' + (resData.message || resData.error || 'Broker API error'));
                 }
               } else {
-                alert('Error cancelling order.');
+                showNotification('Error cancelling order.');
               }
             } catch (err) {
-              alert('Error: ' + err.message);
+              showNotification('Error: ' + err.message);
             }
           }
         });
@@ -5771,10 +5925,10 @@ function renderMobilePositions(positions, containerId, accountId = '') {
   const isTotalPositive = totalPnl >= 0;
   const totalPnlText = `${isTotalPositive ? '+' : '-'}₹${Math.abs(totalPnl).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-  const footerBg = isTotalPositive ? '#E6F4EA' : '#FCE8E6';
-  const footerBorder = isTotalPositive ? '#C4EAD0' : '#fad2cf';
-  const textColor = '#1F2937';
-  const iconColor = isTotalPositive ? '#137333' : '#c5221f';
+  const footerBg = isTotalPositive ? '#17392f' : '#321f2d';
+  const footerBorder = isTotalPositive ? '#315c4c' : '#754052';
+  const textColor = '#eef3fc';
+  const iconColor = isTotalPositive ? '#64dbad' : '#ff8e9b';
 
   // ─── mobile-positions-container: use a GLOBAL FIXED bar at body level ───
   // position:fixed breaks inside CSS-transformed ancestors (the orders slider uses translateX)

@@ -1,4 +1,6 @@
-# Copy Trader
+# Relay
+
+A copy trading workspace with a midnight palette, locally hosted typography, and clear source/follower execution tracking.
 
 ## Run locally
 
@@ -10,6 +12,10 @@ Requires Node.js 22.13 or newer (Node's built-in SQLite is used).
 4. Run `npm start` and sign in at `http://localhost:3000` with the administrator password. Authentication no longer trusts `X-User-Id` or browser local storage.
 
 Use `OFFLINE_MODE=true` to prevent startup broker connections and instrument downloads. Offline mode has no synthetic market quotes; paper market orders require a recent real quote. It is not a substitute for disconnecting live accounts during development. Tests use a separate temporary data directory and mocked brokers, never the real account configuration.
+
+The dashboard setup checklist links to Accounts and Copy Setup. New copy links start disabled. Review source/follower accounts and quantity multipliers before enabling and saving; enabling live followers opens a review dialog. Paper Practice only accepts connected paper accounts, and the server prevents paper sources from copying into live followers. Live order tickets identify the account and show a review before submission.
+
+Orders contains recent execution activity grouped by source order and follower, with filled quantities and broker-check guidance. Server connectivity, startup offline mode, live broker connections, and quote freshness are displayed separately. Unavailable quotes have no receipt timestamp. Details, position conversion, and SL / Target controls are disabled until those features are implemented; manage protective orders in the broker application.
 
 ## Security and migration
 
