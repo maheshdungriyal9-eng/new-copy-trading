@@ -23,101 +23,31 @@ try {
 }
 
 const conn = new Client();
+for (const name of ['VPS_SSH_HOST', 'VPS_SSH_USER', 'VPS_REMOTE_ROOT']) {
+  if (!process.env[name]) throw new Error(name + ' is required');
+}
+if (!process.env.VPS_SSH_PASSWORD && !process.env.VPS_SSH_KEY_PATH) throw new Error('SSH credentials are required');
+const remoteRoot = process.env.VPS_REMOTE_ROOT;
+if (!remoteRoot.startsWith('/') || !/^[A-Za-z0-9_./-]+$/.test(remoteRoot) || remoteRoot.includes('..') || remoteRoot === '/') throw new Error('Invalid deployment directory');
 const config = {
-  host: '34.93.162.96',
+  host: process.env.VPS_SSH_HOST,
   port: 22,
-  username: 'tradenterinvest',
-  password: 'mahesh789',
+  username: process.env.VPS_SSH_USER,
+  password: process.env.VPS_SSH_PASSWORD,
+  privateKey: process.env.VPS_SSH_KEY_PATH ? fs.readFileSync(process.env.VPS_SSH_KEY_PATH) : undefined,
   readyTimeout: 30000
 };
 
 // Map local file paths to their remote target paths
 const filesToUpload = [
-  {
-    local: path.join(__dirname, '..', 'frontend', 'style.min.css'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/frontend/style.min.css'
-  },
-  {
-    local: path.join(__dirname, '..', 'frontend', 'index.html'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/frontend/index.html'
-  },
-  {
-    local: path.join(__dirname, '..', 'frontend', 'app_v6.min.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/frontend/app_v6.min.js'
-  },
-  {
-    local: path.join(__dirname, 'server.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/server.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'angelOneService.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/angelOneService.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'motilalService.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/motilalService.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'copyTradingEngine.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/copyTradingEngine.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'tunnelService.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/tunnelService.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'orderQueueService.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/orderQueueService.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'dbService.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/dbService.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'cryptoService.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/cryptoService.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'unifiedWsClient.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/unifiedWsClient.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'dhanTradeService.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/dhanTradeService.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'dhanService.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/dhanService.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'instrumentService.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/instrumentService.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'totp.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/totp.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'stockDb.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/stockDb.js'
-  },
-  {
-    local: path.join(__dirname, 'services', 'foSymbols.json'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/services/foSymbols.json'
-  },
-  {
-    local: path.join(__dirname, 'get_motilal_orders.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/get_motilal_orders.js'
-  },
-  {
-    local: path.join(__dirname, 'test_angel_quote.js'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/test_angel_quote.js'
-  },
-  {
-    local: path.join(__dirname, 'package.json'),
-    remote: '/home/tradenterinvest/app/copy-trading-app/backend/package.json'
-  }
+  ...['index.html', 'style.min.css', 'app_v6.min.js'].map(filename => ({ local: path.join(__dirname, '../frontend', filename), remote: remoteRoot + '/frontend/' + filename })),
+  ...['server.js', 'package.json', 'package-lock.json'].map(filename => ({ local: path.join(__dirname, filename), remote: remoteRoot + '/backend/' + filename })),
+  ...fs.readdirSync(path.join(__dirname, 'services')).filter(filename => /\.(js|json)$/.test(filename)).map(filename => ({ local: path.join(__dirname, 'services', filename), remote: remoteRoot + '/backend/services/' + filename }))
 ];
+if (!process.argv.includes('--execute')) {
+  console.log('Validation only. Runtime files:', filesToUpload.length, 'Use --execute to upload and restart; back up remote data first.');
+  process.exit(0);
+}
 
 conn.on('ready', () => {
   console.log('SSH connection established. Initializing SFTP...');
@@ -145,6 +75,7 @@ conn.on('ready', () => {
       
       sftp.fastPut(localPath, remotePath, (err) => {
         if (err) {
+          process.exitCode = 1;
           console.error(`Error uploading ${path.basename(localPath)}:`, err);
           conn.end();
           return;
@@ -158,12 +89,13 @@ conn.on('ready', () => {
     uploadNext();
   });
 }).on('error', (err) => {
+  process.exitCode = 1;
   console.error('Connection error:', err);
 }).connect(config);
 
 function restartPM2() {
   console.log('Installing dependencies on VPS and restarting copy-trading app using PM2...');
-  conn.exec('npm --prefix /home/tradenterinvest/app/copy-trading-app/backend install && pm2 restart copy-trading', (err, stream) => {
+  conn.exec('cd ' + remoteRoot + '/backend && node -e "if(Number(process.versions.node.split(\'.\')[0])<22)process.exit(1)" && npm ci --omit=dev --ignore-scripts && pm2 restart copy-trading --update-env', (err, stream) => {
     if (err) {
       console.error('PM2 restart error:', err);
       conn.end();
@@ -172,6 +104,7 @@ function restartPM2() {
     let output = '';
     stream.on('close', (code, signal) => {
       console.log(`PM2 restart command completed with code ${code}.`);
+      if (code !== 0) process.exitCode = 1;
       console.log(output);
       conn.end();
     }).on('data', (data) => {

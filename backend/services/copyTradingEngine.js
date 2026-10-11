@@ -10,7 +10,7 @@ function mapProductType(product, broker, exchange) {
   const derivative = ['NFO', 'BFO', 'NSEFO', 'BSEFO', 'MCX', 'CDS'].includes(exchange);
   const intraday = ['INTRADAY', 'MIS', 'VALUEPLUS'].includes(normalized);
   const financed = ['MARGIN', 'MTF'].includes(normalized);
-  if (broker === 'motilal') return intraday ? 'VALUEPLUS' : derivative || financed ? 'NORMAL' : 'DELIVERY';
+  if (broker === 'motilal') return intraday ? 'VALUEPLUS' : derivative ? 'NORMAL' : financed ? 'MTF' : 'DELIVERY';
   if (broker === 'angel_one') return intraday ? 'INTRADAY' : derivative ? 'CARRYFORWARD' : financed ? 'MARGIN' : 'DELIVERY';
   return intraday ? 'INTRADAY' : derivative ? 'MARGIN' : financed ? 'MTF' : 'CNC';
 }
@@ -30,6 +30,7 @@ class CopyTradingEngine {
     this.mappings = [];
     this.logs = [];
     this.copiedMasterOrders = storage.readJson('copied_orders.json', {});
+    this.primedLinks = new Set(this.copiedMasterOrders.__primedLinks || []);
     this.primedMasters = new Set(this.copiedMasterOrders.__primedMasters || []);
     this.masterPollers = {};
     this.masterLocks = new Map();
@@ -42,6 +43,7 @@ class CopyTradingEngine {
   clearLogs(accountIds, userId) { this.logs = this.logs.filter(log => !accountIds.includes(log.accountId) && log.userId !== userId); }
   saveCopiedOrders() {
     this.copiedMasterOrders.__primedMasters = [...this.primedMasters];
+    this.copiedMasterOrders.__primedLinks = [...this.primedLinks];
     storage.writeJson('copied_orders.json', this.copiedMasterOrders);
   }
   initializeService(account) {
@@ -61,8 +63,11 @@ class CopyTradingEngine {
     const valid = validation.mappings(mappings, Object.keys(this.services));
     for (const mapping of valid) {
       if (this.services[mapping.masterId].account.ownerId !== this.services[mapping.childId].account.ownerId) validation.reject('Cross-user mappings are prohibited');
-      if (!this.activatedAt.has(mapping.masterId)) this.activatedAt.set(mapping.masterId, Date.now());
+      const link = mapping.masterId + ':' + mapping.childId + ':' + mapping.multiplier;
+      if (!this.activatedAt.has(link)) this.activatedAt.set(link, Date.now());
     }
+    const activeLinks = new Set(valid.filter(mapping => mapping.active).map(mapping => mapping.masterId + ':' + mapping.childId + ':' + mapping.multiplier));
+    for (const link of this.primedLinks) if (!activeLinks.has(link)) this.primedLinks.delete(link);
     this.mappings = valid;
     if (this.started) this.syncMasterPollers();
   }
@@ -90,25 +95,31 @@ class CopyTradingEngine {
     }
   }
   async primeMaster(masterId) {
-    if (this.primedMasters.has(masterId)) return;
+    const pending = this.mappings.filter(mapping => mapping.active && mapping.masterId === masterId && !this.primedLinks.has(masterId + ':' + mapping.childId + ':' + mapping.multiplier));
+    if (!pending.length) return;
     if (this.primeLocks.has(masterId)) return this.primeLocks.get(masterId);
     const promise = (async () => {
       const orders = await this.services[masterId].getOrderBook(true);
       if (!Array.isArray(orders)) throw new Error('Cannot establish master order baseline');
-      for (const order of orders) {
-        const timestamp = executionTime(order.updatetime);
-        if (Number.isFinite(timestamp) && timestamp >= (this.activatedAt.get(masterId) || Date.now())) continue;
-        const quantity = this.filledQuantity(order);
-        if (!quantity || !order.orderid) continue;
-        const key = masterId + '_' + order.orderid;
-        if (this.copiedMasterOrders[key]) continue;
-        this.copiedMasterOrders[key] = {};
-        for (const mapping of this.mappings.filter(entry => entry.active && entry.masterId === masterId)) {
-          this.copiedMasterOrders[key][mapping.childId] = Math.floor(quantity * mapping.multiplier);
+      const previous = structuredClone(this.copiedMasterOrders);
+      const previousLinks = new Set(this.primedLinks);
+      try {
+        for (const mapping of pending) {
+          const link = masterId + ':' + mapping.childId + ':' + mapping.multiplier;
+          for (const order of orders) {
+            const timestamp = executionTime(order.updatetime);
+            if (Number.isFinite(timestamp) && timestamp >= (this.activatedAt.get(link) || Date.now())) continue;
+            const quantity = this.filledQuantity(order);
+            if (!quantity || !order.orderid) continue;
+            const key = masterId + '_' + order.orderid;
+            if (typeof this.copiedMasterOrders[key] === 'number') continue;
+            (this.copiedMasterOrders[key] ||= {})[mapping.childId] = quantity * mapping.multiplier;
+          }
+          this.primedLinks.add(link);
         }
-      }
-      this.primedMasters.add(masterId);
-      this.saveCopiedOrders();
+        this.primedMasters.add(masterId);
+        this.saveCopiedOrders();
+      } catch (error) { this.copiedMasterOrders = previous; this.primedLinks = previousLinks; throw error; }
     })();
     this.primeLocks.set(masterId, promise);
     try { await promise; } finally { this.primeLocks.delete(masterId); }
@@ -118,9 +129,14 @@ class CopyTradingEngine {
     const quantity = Number(order.filledshares ?? order.totalqtytraded ?? (complete ? order.quantity : 0));
     return Number.isSafeInteger(quantity) && quantity > 0 ? quantity : 0;
   }
-  async validateOrder(accountId, params) {
+  async validateOrder(accountId, params, jobId) {
     const service = this.services[accountId];
     if (!service) validation.reject('Account not found');
+    const matchingContract = require('./instrumentService').resolveContract(params.tradingsymbol, params.exchange);
+    if (!service.account.isSimulated && service.account.broker !== 'dhan' && (!matchingContract || (matchingContract.token && String(params.symboltoken) !== String(matchingContract.token)))) validation.reject('Symbol, token and exchange do not match the instrument master');
+    const dhanContract = service.account.broker === 'dhan' ? require('./dhanService').getDhanSymbolDetails(params.tradingsymbol, params.exchange) : null;
+    if (!service.account.isSimulated && service.account.broker === 'dhan' && (!dhanContract || (dhanContract.expiryDate && dhanContract.expiryDate < new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })))) validation.reject('Dhan instrument is missing or expired');
+    if (matchingContract?.expiry && matchingContract.expiry.slice(0, 10) < new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })) validation.reject('Contract has expired');
     if (['NFO', 'BFO', 'MCX', 'CDS'].includes(params.exchange)) {
       const contract = require('./instrumentService').getDatabase().find(item => item.symbol === params.tradingsymbol && item.exchange === params.exchange);
       const dhan = require('./dhanService');
@@ -131,12 +147,26 @@ class CopyTradingEngine {
     }
     if (params.reduceOnly) {
       service.clearCache?.();
-      const [positions, holdings] = await Promise.all([service.getPosition(), service.getHolding()]);
+      const [positions, holdings, orders] = await Promise.all([service.getPosition(true), service.getHolding(true), service.getOrderBook(true)]);
       const product = mapProductType(params.producttype, service.account.broker, params.exchange);
-      const position = positions.find(item => item.tradingsymbol === params.tradingsymbol && item.exchange === params.exchange && mapProductType(item.producttype, service.account.broker, item.exchange) === product);
-      const holding = holdings.find(item => item.tradingsymbol === params.tradingsymbol && item.exchange === params.exchange);
+      const sameSymbol = symbol => symbol === params.tradingsymbol || (matchingContract && require('./instrumentService').resolveContract(symbol, params.exchange)?.symbol === matchingContract.symbol);
+      const position = positions.find(item => sameSymbol(item.tradingsymbol) && item.exchange === params.exchange && mapProductType(item.producttype, service.account.broker, item.exchange) === product);
+      const holding = holdings.find(item => sameSymbol(item.tradingsymbol) && item.exchange === params.exchange);
       const net = position ? Number(position.netqty) : ['DELIVERY', 'CNC'].includes(product) && holding ? Number(holding.quantity) : 0;
-      if (!net || params.quantity > Math.abs(net) || params.transactiontype !== (net > 0 ? 'SELL' : 'BUY')) validation.reject('Exit exceeds the current position or uses the wrong side/product');
+      const pending = orders.filter(order => String(order.orderid) !== String(params.orderid || '') && sameSymbol(order.tradingsymbol) && order.exchange === params.exchange && String(order.transactiontype).toUpperCase() === params.transactiontype && mapProductType(order.producttype, service.account.broker, order.exchange) === product && !['complete', 'executed', 'traded', 'trd', 'rejected', 'cancelled', 'canceled', 'expired'].includes(String(order.orderstatus || order.status).toLowerCase()));
+      let reserved = pending.reduce((total, order) => total + Math.max(0, Number(order.quantity) - Number(order.filledshares || 0)), 0);
+      const queue = this.queue || require('./orderQueueService');
+      if (queue.listJobs) {
+        const jobs = await queue.listJobs(service.account.ownerId);
+        for (const job of jobs) {
+          if (job.id === jobId || job.targetId !== accountId || !['PROCESSING', 'ACCEPTED', 'RECONCILE_REQUIRED'].includes(job.status)) continue;
+          const trade = job.tradeParams;
+          if (!sameSymbol(trade.tradingsymbol) || trade.exchange !== params.exchange || trade.transactiontype !== params.transactiontype || mapProductType(trade.producttype, service.account.broker, trade.exchange) !== product) continue;
+          if (orders.some(order => String(order.orderid) === String(job.result?.brokerOrderId))) continue;
+          reserved += Math.max(0, Number(trade.quantity) - Number(job.result?.filledQuantity || 0));
+        }
+      }
+      if (!net || params.quantity > Math.max(0, Math.abs(net) - reserved) || params.transactiontype !== (net > 0 ? 'SELL' : 'BUY')) validation.reject('Exit exceeds the current position or uses the wrong side/product');
     }
   }
   getChildOrderParams(broker, exchange, side, masterPrice) {
@@ -168,6 +198,7 @@ class CopyTradingEngine {
         for (const mapping of this.mappings.filter(entry => entry.active && entry.masterId === masterId)) {
           const child = this.services[mapping.childId];
           if (!child) continue;
+          try {
           const expected = filled * mapping.multiplier;
           if (!Number.isSafeInteger(expected) || expected <= 0) {
             this.addLog({ timestamp: new Date().toISOString(), accountId: mapping.childId, type: 'error', message: 'Copy quantity is fractional; adjust multiplier' });
@@ -181,9 +212,11 @@ class CopyTradingEngine {
           const exchange = order.exchange;
           const side = String(order.transactiontype || order.buyorsell || '').toUpperCase();
           const { childPrice, childOrderType } = this.getChildOrderParams(child.account.broker, exchange, side, Number(order.averageprice || 0));
-          const params = { tradingsymbol: order.tradingsymbol, symboltoken: order.symboltoken, exchange, transactiontype: side, quantity: expected - reserved, price: childPrice, ordertype: childOrderType, producttype: mapProductType(order.producttype, child.account.broker, exchange), expiry: order.expiry, optiontype: order.optiontype, strike: order.strike };
-          await this.validateOrder(mapping.childId, validation.trade(params));
+          const params = { tradingsymbol: order.tradingsymbol, symboltoken: order.symboltoken, exchange, transactiontype: side, quantity: expected - reserved, price: childPrice, ordertype: childOrderType, producttype: mapProductType(order.producttype, child.account.broker, exchange), expiry: order.expiry || order.expirydate, expirydate: order.expirydate || order.expiry, optiontype: order.optiontype, strike: order.strike || order.strikeprice, strikeprice: order.strikeprice || order.strike };
+          const contract = require('./instrumentService').resolveContract(params.tradingsymbol, exchange);
+          if (contract) { params.tradingsymbol = contract.symbol; params.symboltoken = contract.token; }
           await queue.enqueueOrder(child.account.ownerId, mapping.childId, params, { trackingKey, expectedChildQty: expected, masterOrderId: order.orderid });
+          } catch (error) { this.addLog({ timestamp: new Date().toISOString(), accountId: mapping.childId, type: 'error', message: 'Copy could not be queued: ' + error.message }); }
         }
       }
     });

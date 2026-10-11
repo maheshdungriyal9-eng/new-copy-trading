@@ -24,6 +24,13 @@ const compression = require('compression');
 app.use(compression());
 
 app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('X-Frame-Options', 'DENY');
+  if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
+  next();
+});
 app.use(express.json({ limit: '64kb' }));
 for (const method of ['get', 'post', 'put', 'delete']) {
   const register = app[method].bind(app);
@@ -76,36 +83,12 @@ let lastSearchSymbols = [];
 let lastSearchSymbolsTime = 0;
 
 function updateSymbolOHLC(symbol, ltp, prevClose, open, high, low, depth) {
-  if (!symbol) return;
-  basePrices[symbol] = ltp;
-  
-  if (prevClose !== undefined && prevClose !== null) {
-    basePrevCloses[symbol] = prevClose;
-  } else if (!basePrevCloses[symbol]) {
-    basePrevCloses[symbol] = ltp;
+  if (!symbol || !Number.isFinite(Number(ltp)) || Number(ltp) <= 0) return;
+  basePrices[symbol] = Number(ltp);
+  for (const [map, value] of [[basePrevCloses, prevClose], [baseOpens, open], [baseHighs, high], [baseLows, low]]) {
+    if (value !== null && value !== undefined && Number(value) > 0) map[symbol] = Number(value);
   }
-  
-  if (open !== undefined && open !== null) {
-    baseOpens[symbol] = open;
-  } else if (!baseOpens[symbol]) {
-    baseOpens[symbol] = basePrevCloses[symbol] || ltp;
-  }
-  
-  if (high !== undefined && high !== null) {
-    baseHighs[symbol] = high;
-  } else {
-    baseHighs[symbol] = Math.max(ltp, baseHighs[symbol] || ltp);
-  }
-  
-  if (low !== undefined && low !== null) {
-    baseLows[symbol] = low;
-  } else {
-    baseLows[symbol] = Math.min(ltp, baseLows[symbol] || ltp);
-  }
-
-  if (depth !== undefined && depth !== null) {
-    baseDepths[symbol] = depth;
-  }
+  if (depth) baseDepths[symbol] = depth;
 }
 
 let cachedSearchBases = [];
@@ -195,6 +178,7 @@ function populateBasePrices() {
   cachedSearchBases = Object.values(symbolToStockMap);
 }
 
+populateBasePrices();
 const CONFIG_PATH = storage.dataPath('config.json');
 function loadConfig() { return configService.loadConfig(); }
 function saveConfig(config) { configService.saveConfig(config); currentConfig = config; }
@@ -267,8 +251,9 @@ app.post('/api/accounts', (req, res) => {
   if (!input || !['angel_one', 'motilal', 'dhan'].includes(input.broker) || typeof input.isSimulated !== 'boolean') validation.reject('Invalid account broker or simulation flag');
   const existing = input.id && user.accounts.find(account => account.id === input.id);
   if (input.id && !existing) return res.status(404).json({ error: 'Account not found' });
+  if (existing && existing.broker !== input.broker) validation.reject('Create a separate account to change broker');
   if (existing && existing.isSimulated !== input.isSimulated) validation.reject('Create a separate account to switch between paper and live trading');
-  const allowed = ['name', 'broker', 'isSimulated', 'clientCode', 'userId', 'proxyUrl', ...configService.sensitiveFields];
+  const allowed = ['type', 'name', 'broker', 'isSimulated', 'clientCode', 'userId', 'proxyUrl', ...configService.sensitiveFields];
   const account = { ...(existing || {}), id: existing?.id || 'acc_' + crypto.randomUUID(), ownerId: user.id };
   for (const field of allowed) {
     if (input[field] === undefined) continue;
@@ -276,6 +261,8 @@ app.post('/api/accounts', (req, res) => {
     if (configService.sensitiveFields.includes(field) && input[field] === '' && existing) continue;
     account[field] = input[field];
   }
+  account.type = account.type || 'child';
+  if (!['master', 'child'].includes(account.type)) validation.reject('Invalid account role');
   account.name = String(account.name || account.clientCode || account.userId || 'Account').trim().slice(0, 100);
   if (!existing && input.isSimulated) {
     account.balance = Number(input.balance ?? 1000000);
@@ -449,7 +436,7 @@ app.post('/api/groups', (req, res) => {
   const { config, user } = getUserConfig(req.userId);
   if (!Array.isArray(req.body) || req.body.length > 100) validation.reject('Invalid groups');
   const groups = req.body.map(group => {
-    if (!group || typeof group.name !== 'string' || group.name.length > 100 || !Array.isArray(group.children)) validation.reject('Invalid group');
+    if (!group || (group.id && !/^[A-Za-z0-9_-]{1,100}$/.test(group.id)) || typeof group.name !== 'string' || group.name.length > 100 || !Array.isArray(group.children)) validation.reject('Invalid group');
     return { id: String(group.id || crypto.randomUUID()), name: group.name, masterId: group.masterId, active: group.active !== false, children: group.children.map(child => ({ childId: child.childId, multiplier: Number(child.multiplier), active: child.active !== false })) };
   });
   const mappings = groups.flatMap(group => group.children.map(child => ({ masterId: group.masterId, childId: child.childId, multiplier: child.multiplier, active: group.active && child.active })));
@@ -526,7 +513,7 @@ app.get('/api/portfolio/:id', async (req, res) => {
 
     res.json({ holdings, positions, funds });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
@@ -560,8 +547,14 @@ app.post('/api/execute-trade', async (req, res) => {
       message: 'Order submitted to execution queue.'
     });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(error.status || 500).json({ success: false, error: error.message });
   }
+});
+
+app.post('/api/queue/jobs/:jobId/retry', async (req, res) => {
+  if (req.body.confirmed !== true) return res.status(400).json({ error: 'Explicit retry confirmation is required' });
+  const result = await orderQueueService.retryJob(req.params.jobId, req.userId);
+  res.json(result);
 });
 
 // Query execution status of an order job
@@ -994,7 +987,7 @@ app.get('/api/stocks/candles', async (req, res) => {
     });
   } catch (error) {
     console.error(`Error fetching candles for ${symbol}:`, error.message);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
@@ -1344,7 +1337,7 @@ app.post('/api/orders/cancel', async (req, res) => {
 
     res.json(result);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
@@ -1363,18 +1356,10 @@ app.post('/api/orders/modify', async (req, res) => {
     const original = (await service.getOrderBook(true)).find(order => String(order.orderid) === String(orderid));
     if (!original) validation.reject('Order not found');
     await copyEngine.validateOrder(accountId, validation.trade({ ...original, quantity, price, ordertype: ordertype || original.ordertype }));
-    const result = await service.modifyOrder({
-      orderid,
-      quantity,
-      price,
-      ordertype,
-      symboltoken,
-      exchange,
-      producttype
-    });
+    const result = await service.modifyOrder({ ...original, orderid, quantity, price, ordertype: ordertype || original.ordertype });
     res.json(result);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 

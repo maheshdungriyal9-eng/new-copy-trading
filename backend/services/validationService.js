@@ -4,6 +4,7 @@ const products = new Set(['INTRADAY', 'DELIVERY', 'CNC', 'MARGIN', 'MTF', 'CARRY
 function reject(message) {
   const error = new Error(message);
   error.status = 400;
+  error.definitive = true;
   throw error;
 }
 

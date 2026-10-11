@@ -93,8 +93,9 @@ function mount(app) {
   });
   app.post('/api/auth/firebase-success', rateLimit, async (req, res) => {
     try {
-      const config = configService.loadConfig();
+      let config = configService.loadConfig();
       const claims = await verifyFirebase(req.body.idToken, config.firebase?.projectId);
+      config = configService.loadConfig();
       let user = config.users.find(entry => entry.firebaseUid === claims.sub);
       if (!user) {
         user = { id: 'usr_fb_' + crypto.createHash('sha256').update(claims.sub).digest('hex').slice(0, 24), firebaseUid: claims.sub, name: claims.name || 'User', email: claims.email_verified ? claims.email : '', phone: claims.phone_number || '', accounts: [], mappings: [] };

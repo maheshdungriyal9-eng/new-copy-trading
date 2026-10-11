@@ -1,18 +1,21 @@
 const storage = require('./storageService');
 const cryptoService = require('./cryptoService');
 
-const sensitiveFields = ['password', 'totpSecret', 'apiKey', 'apiSecret', 'twoFactor', 'accessToken'];
+const sensitiveFields = ['password', 'totpSecret', 'apiKey', 'apiSecret', 'twoFactor', 'accessToken', 'proxyUrl'];
 const initial = { users: [{ id: 'usr_default', name: 'Administrator', accounts: [], mappings: [], groups: [] }] };
 
 function loadConfig() {
   const config = storage.readJson('config.json', initial);
   if (!config || !Array.isArray(config.users)) throw new Error('Invalid config.json: expected users array');
   const ids = new Set();
+  const users = new Set();
   for (const user of config.users) {
     if (!user || typeof user.id !== 'string' || !Array.isArray(user.accounts) || !Array.isArray(user.mappings || [])) throw new Error('Invalid user configuration');
+    if (!/^[A-Za-z0-9_-]{1,100}$/.test(user.id) || users.has(user.id)) throw new Error('Invalid or duplicate user ID');
+    users.add(user.id);
     user.mappings ||= [];
     for (const account of user.accounts) {
-      if (!account || typeof account.id !== 'string' || ids.has(account.id)) throw new Error('Account IDs must be globally unique');
+      if (!account || typeof account.id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(account.id) || ids.has(account.id)) throw new Error('Account IDs must be globally unique');
       ids.add(account.id);
       for (const field of sensitiveFields) if (account[field]) account[field] = cryptoService.decrypt(account[field]);
     }

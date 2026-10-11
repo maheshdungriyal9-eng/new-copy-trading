@@ -2,6 +2,13 @@ const crypto = require('crypto');
 const configService = require('./configService');
 const validation = require('./validationService');
 
+function paperProduct(product, exchange) {
+  const normalized = String(product || 'DELIVERY').toUpperCase();
+  if (['INTRADAY', 'MIS', 'VALUEPLUS'].includes(normalized)) return 'INTRADAY';
+  if (['NFO', 'BFO', 'NSEFO', 'BSEFO', 'MCX', 'CDS'].includes(exchange)) return 'CARRYFORWARD';
+  return ['MTF', 'MARGIN'].includes(normalized) ? 'MTF' : 'DELIVERY';
+}
+
 class SimulatedPortfolioManager {
   constructor(options = {}) {
     this.persist = options.persist || ((account, state) => configService.updateAccount(account.id, stored => { stored.simState = state; stored.balance = state.balance; }));
@@ -13,7 +20,9 @@ class SimulatedPortfolioManager {
 
   state(account) {
     if (!account.isSimulated) validation.reject('Paper operations require a simulated account');
-    return structuredClone(account.simState || { balance: Number(account.balance ?? 1000000), orders: [], positions: [], holdings: [], closedTrades: [] });
+    const state = structuredClone(account.simState || { balance: Number(account.balance ?? 1000000), orders: [], positions: [], holdings: [], closedTrades: [] });
+    for (const item of [...state.orders, ...state.positions, ...state.holdings]) item.producttype = paperProduct(item.producttype, item.exchange);
+    return state;
   }
 
   commit(account, state) {
@@ -37,11 +46,11 @@ class SimulatedPortfolioManager {
     const oldQuantity = position ? Number(delivery ? position.quantity : position.netqty) : 0;
     const average = position ? Number(delivery ? position.averageprice : position.buyavgprice) : 0;
     const delta = side === 'BUY' ? quantity : -quantity;
-    if (order.reduceOnly && (!oldQuantity || quantity > Math.abs(oldQuantity) || Math.sign(delta) === Math.sign(oldQuantity))) throw new Error('Exit exceeds the remaining paper position');
-    if (delivery && oldQuantity + delta < 0) throw new Error('Insufficient paper holdings');
-    if (side === 'BUY' && oldQuantity >= 0 && this.available(state, order.orderid) < quantity * price) throw new Error('Insufficient paper funds');
+    if (order.reduceOnly && (!oldQuantity || quantity > Math.abs(oldQuantity) || Math.sign(delta) === Math.sign(oldQuantity))) validation.reject('Exit exceeds the remaining paper position');
+    if (delivery && oldQuantity + delta < 0) validation.reject('Insufficient paper holdings');
+    if (side === 'BUY' && oldQuantity >= 0 && this.available(state, order.orderid) < quantity * price) validation.reject('Insufficient paper funds');
     const openingShort = Math.max(0, -(oldQuantity + delta)) - Math.max(0, -oldQuantity);
-    if (!delivery && openingShort > 0 && this.available(state, order.orderid) < openingShort * price) throw new Error('Insufficient short collateral');
+    if (!delivery && openingShort > 0 && this.available(state, order.orderid) < openingShort * price) validation.reject('Insufficient short collateral');
     const closing = oldQuantity && Math.sign(oldQuantity) !== Math.sign(delta) ? Math.min(Math.abs(oldQuantity), quantity) : 0;
     if (closing) state.closedTrades.unshift({
       tradingsymbol: order.tradingsymbol, exchange: order.exchange, producttype: order.producttype, quantity: closing,
@@ -105,17 +114,18 @@ class SimulatedPortfolioManager {
 
   async placeOrder(account, input) {
     const params = validation.trade(input);
+    params.producttype = paperProduct(params.producttype, params.exchange);
     const state = this.settle(account);
     const duplicate = params.correlationId && state.orders.find(order => order.correlationId === params.correlationId);
     if (duplicate) return { status: true, data: { orderid: duplicate.orderid } };
     const price = this.price(params.tradingsymbol);
-    if (params.ordertype === 'MARKET' && !(price > 0)) throw new Error('A fresh market quote is required for a paper market order');
+    if (params.ordertype === 'MARKET' && !(price > 0)) validation.reject('A fresh market quote is required for a paper market order');
     const order = {
       ...params, orderid: 'SIM_' + crypto.randomUUID(), quantity: String(params.quantity), price: String(params.price),
       status: 'pending', orderstatus: 'pending', filledshares: '0', unfilledshares: String(params.quantity), averageprice: '0',
       updatetime: new Date().toISOString(), correlationId: params.correlationId || params.clientOrderId || null
     };
-    if (params.transactiontype === 'BUY' && params.ordertype === 'LIMIT' && this.available(state) < params.quantity * params.price) throw new Error('Insufficient paper funds');
+    if (params.transactiontype === 'BUY' && params.ordertype === 'LIMIT' && this.available(state) < params.quantity * params.price) validation.reject('Insufficient paper funds');
     if (params.ordertype === 'MARKET' || (price > 0 && (params.transactiontype === 'BUY' ? price <= params.price : price >= params.price))) this.fill(state, order, price);
     state.orders.unshift(order);
     this.commit(account, state);
@@ -125,12 +135,13 @@ class SimulatedPortfolioManager {
   async modifyOrder(account, params) {
     const state = this.settle(account);
     const order = state.orders.find(entry => entry.orderid === params.orderid);
-    if (!order || order.status !== 'pending') throw new Error('Only a pending paper order can be modified');
+    if (!order || order.status !== 'pending') validation.reject('Only a pending paper order can be modified');
     const updated = validation.trade({ ...order, ...params });
-    if (updated.transactiontype === 'BUY' && this.available(state, order.orderid) < updated.quantity * updated.price) throw new Error('Insufficient paper funds');
+    updated.producttype = paperProduct(updated.producttype, updated.exchange);
+    if (updated.transactiontype === 'BUY' && this.available(state, order.orderid) < updated.quantity * updated.price) validation.reject('Insufficient paper funds');
     Object.assign(order, updated, { quantity: String(updated.quantity), price: String(updated.price) });
     const price = this.price(order.tradingsymbol);
-    if (updated.ordertype === 'MARKET' && !(price > 0)) throw new Error('A fresh market quote is required');
+    if (updated.ordertype === 'MARKET' && !(price > 0)) validation.reject('A fresh market quote is required');
     if (price > 0 && (updated.ordertype === 'MARKET' || (order.transactiontype === 'BUY' ? price <= updated.price : price >= updated.price))) this.fill(state, order, price);
     this.commit(account, state);
     return { status: true, message: 'SUCCESS' };
@@ -139,7 +150,7 @@ class SimulatedPortfolioManager {
   async cancelOrder(account, orderId) {
     const state = this.settle(account);
     const order = state.orders.find(entry => entry.orderid === orderId);
-    if (!order || order.status !== 'pending') throw new Error('Only a pending paper order can be cancelled');
+    if (!order || order.status !== 'pending') validation.reject('Only a pending paper order can be cancelled');
     Object.assign(order, { status: 'cancelled', orderstatus: 'cancelled', updatetime: new Date().toISOString() });
     this.commit(account, state);
     return { status: true, message: 'SUCCESS' };

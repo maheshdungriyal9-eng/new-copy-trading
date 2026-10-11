@@ -11,7 +11,7 @@
   <!-- FontAwesome Icons -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <!-- CSS Stylesheet -->
-  <link rel="stylesheet" href="style.min.css?v=2.6.4">
+  <link rel="stylesheet" href="style.min.css?v=2.6.5">
   <!-- TradingView Advanced Chart Widget -->
   <script src="https://s3.tradingview.com/tv.js"></script>
   <!-- Firebase App & Auth SDKs -->
@@ -28,27 +28,6 @@
     <span class="pull-refresh-text">Swipe down to refresh</span>
   </div>
 
-  <!-- Mock SMS Toast Notification -->
-  <div id="sms-toast" class="sms-toast hidden">
-    <div class="sms-toast-header">
-      <div class="sms-toast-app">
-        <i class="fa-solid fa-message sms-icon"></i>
-        <span>MESSAGES</span>
-      </div>
-      <span class="sms-toast-time">now</span>
-    </div>
-    <div class="sms-toast-body">
-      <span class="sms-sender">Antigravity Auth</span>
-      <p class="sms-message">Your OTP code for Copy Trader is <strong id="sms-otp-code">------</strong>. Valid for 5 minutes.</p>
-    </div>
-    <div class="sms-toast-actions">
-      <button class="sms-btn sms-btn-autofill" id="btn-sms-autofill" onclick="triggerAutoOTPDetect()">
-        <i class="fa-solid fa-wand-magic-sparkles"></i> Auto-Detect & Fill
-      </button>
-      <button class="sms-btn sms-btn-dismiss" onclick="dismissSMSToast()">Dismiss</button>
-    </div>
-  </div>
-
   <!-- Authentication Portal Overlay -->
   <div id="auth-screen" class="auth-screen">
     <div class="auth-card">
@@ -58,6 +37,11 @@
         <p>Premium Copy Trading System</p>
       </div>
 
+      <form onsubmit="handleAdminLogin(event)" style="display:grid;gap:12px;padding:20px 0">
+        <label for="admin-password">Administrator password</label>
+        <input id="admin-password" type="password" autocomplete="current-password" required minlength="16" placeholder="Configured server password">
+        <button type="submit" class="btn btn-primary">Sign in</button>
+      </form>
       <!-- Google Flow Section -->
       <div class="auth-flow-section" id="auth-google-section">
         <div class="google-auth-button-wrapper" style="padding: 20px 0; text-align: center;">
@@ -70,14 +54,12 @@
       </div>
     </div>
   </div>
-    </div>
-  </div>
 
   <!-- Background Blur Elements -->
   <div class="bg-glow bg-glow-1"></div>
   <div class="bg-glow bg-glow-2"></div>
 
-  <div class="app-container">
+  <div class="app-container" inert>
     <!-- Header -->
     <header class="app-header" id="app-header">
       <div class="logo" id="header-logo">
@@ -86,7 +68,8 @@
       </div>
       <div class="system-status" id="header-status">
         <span class="status-indicator online"></span>
-        <span class="status-text">Engine Online</span>
+        <span class="status-text">Copy Trader</span>
+        <button class="btn" onclick="handleLogout()">Log out</button>
       </div>
       <!-- Relocated Search Bar Portal on Mobile Watchlist -->
       <div id="header-mobile-search-portal" class="hidden" style="width: 100%;"></div>
@@ -177,21 +160,21 @@
                   <div class="index-widget">
                     <div class="index-name-row">
                       <span class="index-name">NIFTY</span>
-                      <span class="index-expiry">Expiry Tue</span>
+                      <span class="index-expiry">Contract expiries</span>
                     </div>
                     <div class="index-price-row">
-                      <span class="index-ltp text-green" id="index-nifty-ltp">23,622.90</span>
-                      <span class="index-change text-green" id="index-nifty-change">+461.30 (+1.99%)</span>
+                      <span class="index-ltp text-green" id="index-nifty-ltp">—</span>
+                      <span class="index-change text-green" id="index-nifty-change">—</span>
                     </div>
                   </div>
                   <div class="index-widget">
                     <div class="index-name-row">
                       <span class="index-name">SENSEX</span>
-                      <span class="index-expiry">Expiry Thu</span>
+                      <span class="index-expiry">Contract expiries</span>
                     </div>
                     <div class="index-price-row">
-                      <span class="index-ltp text-green" id="index-sensex-ltp">75,527.95</span>
-                      <span class="index-change text-green" id="index-sensex-change">+1,695.40 (+2.30%)</span>
+                      <span class="index-ltp text-green" id="index-sensex-ltp">—</span>
+                      <span class="index-change text-green" id="index-sensex-change">—</span>
                     </div>
                   </div>
                 </div>
@@ -922,10 +905,7 @@
           </div>
 
           <!-- Expiry Date Dropdown -->
-          <select id="oc-expiry-select" onchange="refreshOptionChainTable()" style="background: rgba(0, 0, 0, 0.25); border: 1px solid var(--border-color); color: var(--text-primary); padding: 6px 12px; border-radius: 8px; font-size: 12px; outline: none; font-family: inherit; font-weight: 600; cursor: pointer;">
-            <option value="25JUN26" selected>30 Jun 2026 M</option>
-            <option value="30JUL26">30 Jul 2026 M</option>
-          </select>
+          <select id="oc-expiry-select" onchange="refreshOptionChainTable()" style="background: rgba(0, 0, 0, 0.25); border: 1px solid var(--border-color); color: var(--text-primary); padding: 6px 12px; border-radius: 8px; font-size: 12px; outline: none; font-family: inherit; font-weight: 600; cursor: pointer;"><option value="">Loading active expiries…</option></select>
         </div>
       </div>
 
@@ -960,11 +940,12 @@
         <button class="btn-back" onclick="backToStockDetails()" style="background: transparent; border: none; color: var(--text-primary); font-size: 18px; cursor: pointer; padding: 4px;"><i class="fa-solid fa-arrow-left"></i></button>
         <div class="order-title-block" style="display: flex; flex-direction: column; gap: 4px;">
           <h2 id="order-symbol" style="font-size: 18px; font-weight: 700; margin: 0; color: var(--text-primary);">SBIN</h2>
-          <div class="order-exchanges" style="display: flex; gap: 12px; font-size: 11px; color: var(--text-secondary);">
+          <span id="order-exchange-label" style="font-weight:600"></span>
+          <div class="order-exchanges" style="display: none; gap: 12px; font-size: 11px; color: var(--text-secondary);">
             <span id="order-exch-nse" onclick="setOrderExchange('NSE')" style="color: var(--text-primary); display: flex; align-items: center; gap: 4px; cursor: pointer;">
               <span class="radio-dot" id="order-nse-dot" style="width: 6px; height: 6px; border-radius: 50%; background: #2ebd85; display: inline-block;"></span> 
               NSE: <span id="order-nse-price" style="font-weight: 600;">₹1,017.15</span> 
-              <span id="order-nse-change" class="text-green" style="font-weight: 600;">(+1.64%)</span>
+              <span id="order-nse-change" class="text-green" style="font-weight: 600;">—</span>
             </span>
             <span id="order-exch-bse" onclick="setOrderExchange('BSE')" style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
               <span class="radio-dot empty" id="order-bse-dot" style="width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--text-muted); display: inline-block;"></span> 
@@ -1038,7 +1019,7 @@
         <!-- Margin Footnotes -->
         <div class="order-margin-info" style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 12px;">
           <div class="margin-item" style="display: flex; flex-direction: column; gap: 4px;">
-            <span class="label" style="color: var(--text-secondary);">Margin Required (Approx)</span>
+            <span class="label" style="color: var(--text-secondary);">Order Notional (Estimate) (Approx)</span>
             <span class="value" id="order-margin-val" style="font-size: 14px; font-weight: 700; color: var(--text-primary);">₹0.00</span>
           </div>
           <div class="margin-item text-right" style="display: flex; flex-direction: column; gap: 4px; text-align: right;">
@@ -1233,6 +1214,6 @@
     </div>
   </div>
 
-  <script src="app_v6.min.js?v=2.7.7"></script>
+  <script src="app_v6.min.js?v=2.7.8"></script>
 </body>
 </html>

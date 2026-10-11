@@ -74,8 +74,12 @@ class AngelOneService {
     }
   }
 
+  sessionKey() {
+    return require('crypto').createHash('sha256').update(JSON.stringify([this.account.ownerId, this.account.id, this.account.clientCode, this.account.password, this.account.apiKey, this.account.totpSecret])).digest('hex');
+  }
+
   log(message, type = 'info', details = null) {
-    this.logCallback({
+    this.logCallback(require('./redactionService').redact({
       timestamp: new Date().toISOString(),
       accountId: this.account.id,
       accountName: this.account.name,
@@ -83,7 +87,7 @@ class AngelOneService {
       type,
       message,
       details
-    });
+    }));
   }
 
   async login() {
@@ -101,7 +105,7 @@ class AngelOneService {
 
     // Shared session check: if another instance already authenticated successfully, reuse it
     const clientCode = this.account.clientCode;
-    if (clientCode && sharedSessions[clientCode] && sharedSessions[clientCode].connected) {
+    if (clientCode && sharedSessions[this.sessionKey()] && sharedSessions[clientCode].connected) {
       this.session = sharedSessions[clientCode];
       this.log(`Re-using active shared session for client ${clientCode}`, 'info');
       return true;
@@ -167,7 +171,7 @@ class AngelOneService {
       if (clientCode && sharedSessions[clientCode]) {
         sharedSessions[clientCode].connected = false;
       }
-      const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
+      const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
       this.log(`Authentication failed: ${errorMsg}`, 'error');
       return false;
     }
@@ -234,9 +238,7 @@ class AngelOneService {
     }
 
     try {
-      if (!this.session.connected) {
-        await this.login();
-      }
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
 
       this.log(`Placing order for ${params.tradingsymbol} (Qty: ${params.quantity})...`, 'info');
 
@@ -332,7 +334,7 @@ class AngelOneService {
       };
 
       if (params.clientOrderId || params.correlationId) {
-        payload.clientrefid = (params.clientOrderId || params.correlationId).substring(0, 25);
+        payload.ordertag = (params.clientOrderId || params.correlationId).substring(0, 19);
       }
 
       this.log('Sending POST to /rest/secure/angelbroking/order/v1/placeOrder', 'api-request', { payload, headers });
@@ -344,28 +346,29 @@ class AngelOneService {
         this.clearCache(); // Force immediate refresh on next poll
         return response.data;
       } else {
-        throw new Error(response.data.message || 'Order placement failed');
+        throw Object.assign(new Error(response.data.message || 'Order placement failed'), { brokerRejected: true });
       }
     } catch (error) {
       this.handleApiError(error, 'Order placement');
-      const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
-      return { status: false, message: errorMsg };
+      const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
+      return { status: false, message: errorMsg, uncertain: !error.brokerRejected && (!error.response || Number(error.response.status) >= 500) };
     }
   }
 
-  async getHolding() {
+  async getHolding(forceRefresh = false) {
     if (this.account.isSimulated) {
       return simManager.getHolding(this.account);
     }
 
     const now = Date.now();
     const cacheDuration = 12 * 60 * 60 * 1000; // 12 hours cache
-    if (this.cache.holding.timestamp && (now - this.cache.holding.timestamp < cacheDuration)) {
+    if (!forceRefresh && this.cache.holding.timestamp && (now - this.cache.holding.timestamp < cacheDuration)) {
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.holding.data || [];
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       const response = await axios.get('https://apiconnect.angelone.in/rest/secure/angelbroking/portfolio/v1/getHolding', this.getConfig(headers));
       if (response.data.status && Array.isArray(response.data.data)) {
@@ -380,26 +383,29 @@ class AngelOneService {
         return data;
       }
       this.cache.holding.timestamp = now - cacheDuration + (5 * 60 * 1000); // Retry in 5 minutes
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.holding.data || [];
     } catch (error) {
+      if (forceRefresh) throw error;
       this.handleApiError(error, 'Fetch holdings');
       this.cache.holding.timestamp = now - cacheDuration + (5 * 60 * 1000); // Retry in 5 minutes
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.holding.data || [];
     }
   }
 
-  async getPosition() {
+  async getPosition(forceRefresh = false) {
     if (this.account.isSimulated) {
       return simManager.getPosition(this.account);
     }
 
     const now = Date.now();
-    if (this.cache.position.timestamp && (now - this.cache.position.timestamp < 5000)) {
+    if (!forceRefresh && this.cache.position.timestamp && (now - this.cache.position.timestamp < 5000)) {
       return this.cache.position.data;
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       const response = await axios.get('https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/getPosition', this.getConfig(headers));
       if (response.data.status && Array.isArray(response.data.data)) {
@@ -428,11 +434,16 @@ class AngelOneService {
         this.cache.position = { data, timestamp: now };
         return data;
       }
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       this.cache.position.timestamp = now;
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.position.data || [];
     } catch (error) {
+      if (forceRefresh) throw error;
       this.handleApiError(error, 'Fetch positions');
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       this.cache.position.timestamp = now;
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.position.data || [];
     }
   }
@@ -448,7 +459,7 @@ class AngelOneService {
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       const response = await axios.get('https://apiconnect.angelone.in/rest/secure/angelbroking/user/v1/getRMS', this.getConfig(headers));
       if (response.data && response.data.status) {
@@ -480,17 +491,19 @@ class AngelOneService {
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       const response = await axios.get('https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/getOrderBook', this.getConfig(headers));
       if (response.data.status && Array.isArray(response.data.data)) {
-        const data = response.data.data;
+        const data = response.data.data.map(order => ({ ...order, correlationId: order.correlationId || order.clientrefid || order.ordertag }));
         this.cache.orderBook = { data, timestamp: now };
         return data;
       }
+      if (forceRefresh) throw new Error('Fresh broker order book unavailable');
       this.cache.orderBook.timestamp = now;
       return this.cache.orderBook.data || [];
     } catch (error) {
+      if (forceRefresh) throw error;
       this.handleApiError(error, 'Fetch order book');
       this.cache.orderBook.timestamp = now;
       return this.cache.orderBook.data || [];
@@ -503,7 +516,7 @@ class AngelOneService {
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       const payload = {
         orderid: orderId,
@@ -520,8 +533,8 @@ class AngelOneService {
       }
     } catch (error) {
       this.handleApiError(error, 'Order cancellation');
-      const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
-      return { status: false, message: errorMsg };
+      const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
+      return { status: false, message: errorMsg, uncertain: !error.brokerRejected && (!error.response || Number(error.response.status) >= 500) };
     }
   }
 
@@ -539,9 +552,7 @@ class AngelOneService {
     if (this.account.isSimulated) return simManager.modifyOrder(this.account, params);
 
     try {
-      if (!this.session.connected) {
-        await this.login();
-      }
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
 
       this.log(`Modifying order ${params.orderid} with Angel One...`, 'info');
       const headers = await this.getHeaders();
@@ -567,8 +578,8 @@ class AngelOneService {
       }
     } catch (error) {
       this.handleApiError(error, 'Order modification');
-      const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
-      return { status: false, message: errorMsg };
+      const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
+      return { status: false, message: errorMsg, uncertain: !error.brokerRejected && (!error.response || Number(error.response.status) >= 500) };
     }
   }
 
@@ -579,7 +590,7 @@ class AngelOneService {
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       const payload = {
         mode: 'FULL',
@@ -604,7 +615,7 @@ class AngelOneService {
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       this.log('Fetching user profile details from Angel One...', 'info');
       const response = await axios.get('https://apiconnect.angelone.in/rest/secure/angelbroking/user/v1/getProfile', this.getConfig(headers));
@@ -619,7 +630,7 @@ class AngelOneService {
   }
 
   handleApiError(error, contextName) {
-    const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
+    const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
     const ctx = contextName || 'API Operation';
     const isBackgroundFetch = ctx.toLowerCase().includes('fetch') || 
                               ctx.toLowerCase().includes('getholding') || 
@@ -660,7 +671,7 @@ class AngelOneService {
     if (isAuthError) {
       this.log('Token or authentication error detected. Setting session to disconnected for auto-relogin.', 'info');
       this.session.connected = false;
-      if (this.account.clientCode && sharedSessions[this.account.clientCode]) {
+      if (this.account.clientCode && sharedSessions[this.sessionKey()]) {
         sharedSessions[this.account.clientCode].connected = false;
       }
     }

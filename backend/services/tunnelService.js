@@ -4,10 +4,10 @@ const net = require('net');
 class TunnelService {
   constructor() {
     this.sshConfig = {
-      host: '34.93.162.96',
+      host: process.env.VPS_SSH_HOST,
       port: 22,
-      username: 'tradenterinvest',
-      password: 'mahesh789',
+      username: process.env.VPS_SSH_USER,
+      password: process.env.VPS_SSH_PASSWORD,
       readyTimeout: 30000
     };
     this.localPort = 3128;
@@ -19,6 +19,7 @@ class TunnelService {
   }
 
   async startTunnel() {
+    if (!this.sshConfig.host || !this.sshConfig.username || !this.sshConfig.password) throw new Error('SSH tunnel credentials must be configured using VPS_SSH_* environment variables');
     return new Promise((resolve) => {
       console.log('[TunnelService] Initializing SSH tunnel to VPS...');
       this.conn = new Client();
@@ -106,9 +107,12 @@ class TunnelService {
       } catch (e) {}
     }
     console.log('[TunnelService] Reconnecting SSH tunnel in 10 seconds...');
-    setTimeout(() => {
-      this.startTunnel();
+    if (this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.startTunnel().catch(error => console.error('[TunnelService]', error.message));
     }, 10000);
+    this.reconnectTimer.unref?.();
   }
 }
 

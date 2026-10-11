@@ -95,7 +95,7 @@ class MotilalService {
   }
 
   log(message, type = 'info', details = null) {
-    this.logCallback({
+    this.logCallback(require('./redactionService').redact({
       timestamp: new Date().toISOString(),
       accountId: this.account.id,
       accountName: this.account.name,
@@ -103,7 +103,7 @@ class MotilalService {
       type,
       message,
       details
-    });
+    }));
   }
 
   async login() {
@@ -193,7 +193,7 @@ class MotilalService {
       }
     } catch (error) {
       this.session.connected = false;
-      const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
+      const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
       this.log(`Authentication failed: ${errorMsg}`, 'error');
       return false;
     }
@@ -226,7 +226,7 @@ class MotilalService {
   }
 
   handleApiError(error, contextName) {
-    const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
+    const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
     const ctx = contextName || 'API Operation';
     const isBackgroundFetch = ctx.toLowerCase().includes('fetch') || 
                               ctx.toLowerCase().includes('getholding') || 
@@ -272,9 +272,7 @@ class MotilalService {
     }
 
     try {
-      if (!this.session.connected) {
-        await this.login();
-      }
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
 
       this.log(`Placing order for ${params.tradingsymbol} (Qty: ${params.quantity})...`, 'info');
 
@@ -360,7 +358,7 @@ class MotilalService {
         targetExchange = 'NSEFO';
       } else if (exchangeStr === 'BFO') {
         targetExchange = 'BSEFO';
-      }
+      } else if (exchangeStr === 'CDS') targetExchange = 'NSECD';
 
       // Map lot size for F&O orders (Motilal Oswal expects quantityinlot to be number of lots)
       let lotSize = 1;
@@ -371,7 +369,7 @@ class MotilalService {
           if (dhanDetails && dhanDetails.lotSize) {
             lotSize = dhanDetails.lotSize;
           } else {
-            lotSize = dhanService.getDhanLotSize(params.tradingsymbol, exchangeStr);
+            lotSize = require('./instrumentService').resolveContract(params.tradingsymbol, exchangeStr)?.lotSize || dhanService.getDhanLotSize(params.tradingsymbol, exchangeStr);
           }
         } catch (e) {
           console.error('[MotilalService] Failed to retrieve contract lot size:', e.message);
@@ -396,7 +394,7 @@ class MotilalService {
         amoorder: 'N',
         algoid: '',
         goodtilldate: '',
-        tag: (params.clientOrderId || params.correlationId || 'CTApp').substring(0, 25)
+        tag: (params.clientOrderId || params.correlationId || 'CTApp').substring(0, 10)
       };
 
       this.log('Sending POST to /rest/trans/v2/placeorder', 'api-request', { payload, headers });
@@ -408,28 +406,29 @@ class MotilalService {
         this.clearCache();
         return response.data;
       } else {
-        throw new Error(response.data.message || 'Order placement failed');
+        throw Object.assign(new Error(response.data.message || 'Order placement failed'), { brokerRejected: true });
       }
     } catch (error) {
       this.handleApiError(error, 'Order placement');
-      const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
-      return { status: 'FAILURE', message: errorMsg };
+      const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
+      return { status: 'FAILURE', message: errorMsg, uncertain: !error.brokerRejected && (!error.response || Number(error.response.status) >= 500) };
     }
   }
 
-  async getHolding() {
+  async getHolding(forceRefresh = false) {
     if (this.account.isSimulated) {
       return simManager.getHolding(this.account);
     }
 
     const now = Date.now();
     const cacheDuration = 12 * 60 * 60 * 1000; // 12 hours cache
-    if (this.cache.holding.timestamp && (now - this.cache.holding.timestamp < cacheDuration)) {
+    if (!forceRefresh && this.cache.holding.timestamp && (now - this.cache.holding.timestamp < cacheDuration)) {
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.holding.data || [];
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       const response = await axios.post('https://openapi.motilaloswal.com/rest/report/v3/getdpholding', {}, this.getConfig(headers));
       if (response.data && response.data.status === 'SUCCESS' && Array.isArray(response.data.data)) {
@@ -455,26 +454,29 @@ class MotilalService {
         return data;
       }
       this.cache.holding.timestamp = now - cacheDuration + (5 * 60 * 1000); // Retry in 5 minutes
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.holding.data || [];
     } catch (error) {
+      if (forceRefresh) throw error;
       this.handleApiError(error, 'Fetch holdings');
       this.cache.holding.timestamp = now - cacheDuration + (5 * 60 * 1000); // Retry in 5 minutes
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.holding.data || [];
     }
   }
 
-  async getPosition() {
+  async getPosition(forceRefresh = false) {
     if (this.account.isSimulated) {
       return simManager.getPosition(this.account);
     }
 
     const now = Date.now();
-    if (this.cache.position.timestamp && (now - this.cache.position.timestamp < 5000)) {
+    if (!forceRefresh && this.cache.position.timestamp && (now - this.cache.position.timestamp < 5000)) {
       return this.cache.position.data;
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       const response = await axios.post('https://openapi.motilaloswal.com/rest/book/v4/getposition', {}, this.getConfig(headers));
       if (response.data && response.data.status === 'SUCCESS' && Array.isArray(response.data.data)) {
@@ -508,11 +510,16 @@ class MotilalService {
         this.cache.position = { data, timestamp: now };
         return data;
       }
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       this.cache.position.timestamp = now;
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.position.data || [];
     } catch (error) {
+      if (forceRefresh) throw error;
       this.handleApiError(error, 'Fetch positions');
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       this.cache.position.timestamp = now;
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.position.data || [];
     }
   }
@@ -528,7 +535,7 @@ class MotilalService {
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       const response = await axios.post('https://openapi.motilaloswal.com/rest/report/v3/getreportmarginsummary', {}, this.getConfig(headers));
       if (response.data && response.data.status === 'SUCCESS' && Array.isArray(response.data.data)) {
@@ -561,10 +568,11 @@ class MotilalService {
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       const response = await axios.post('https://openapi.motilaloswal.com/rest/book/v5/getorderbook', {}, this.getConfig(headers));
-      const data = response.data.status === 'SUCCESS' ? response.data.data : [];
+      if (response.data.status !== 'SUCCESS') throw new Error(response.data.message || 'Order book unavailable');
+      const data = response.data.data || [];
       const normalizedData = data.map(o => {
         let exchange = 'NSE';
         const ex = (o.exchange || '').toUpperCase();
@@ -574,22 +582,27 @@ class MotilalService {
         else if (ex === 'NSECD') exchange = 'CDS';
         else exchange = ex;
 
+        const contract = require('./instrumentService').getDatabase().find(item => item.exchange === exchange && String(item.token) === String(o.symboltoken));
         const qty = parseInt(o.orderqty || 0);
         const filled = parseInt(o.totalqtytraded || 0);
 
         return {
           orderid: o.uniqueorderid || o.orderid,
           correlationId: o.tag || o.clientrefid,
-          tradingsymbol: o.symbol || o.tradingsymbol,
+          tradingsymbol: contract?.symbol || o.symbol || o.tradingsymbol,
           symboltoken: String(o.symboltoken || ''),
-          transactiontype: o.buyorsell,
+          transactiontype: String(o.buyorsell || '').toUpperCase(),
           exchange: exchange,
-          ordertype: o.ordertype,
+          ordertype: String(o.ordertype || o.booktype || '').toUpperCase(),
+          lastmodifiedtime: o.lastmodifiedtime,
+          qtytradedtoday: o.qtytradedtoday,
+          lotsize: o.lotsize,
+          message: o.error,
           producttype: o.producttype || o.productname || 'Normal',
           quantity: qty.toString(),
           price: (o.price || 0).toString(),
-          status: (o.orderstatus || '').toLowerCase(),
-          orderstatus: (o.orderstatus || '').toLowerCase(),
+          status: String(o.orderstatus || '').toLowerCase() === 'cancel' ? 'cancelled' : String(o.orderstatus || '').toLowerCase(),
+          orderstatus: String(o.orderstatus || '').toLowerCase() === 'cancel' ? 'cancelled' : String(o.orderstatus || '').toLowerCase(),
           updatetime: o.recordinserttime || new Date().toLocaleString(),
           averageprice: (o.averageprice || 0).toString(),
           filledshares: filled.toString(),
@@ -602,7 +615,9 @@ class MotilalService {
       this.cache.orderBook = { data: normalizedData, timestamp: now };
       return normalizedData;
     } catch (error) {
+      if (forceRefresh) throw error;
       this.handleApiError(error, 'Fetch order book');
+      if (forceRefresh) throw new Error('Fresh broker order book unavailable');
       this.cache.orderBook.timestamp = now;
       return this.cache.orderBook.data || [];
     }
@@ -612,18 +627,20 @@ class MotilalService {
     if (this.account.isSimulated) return simManager.modifyOrder(this.account, params);
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
+      const derivative = ['NFO', 'BFO', 'MCX', 'CDS'].includes(params.exchange);
+      const lotSize = derivative ? Number(require('./instrumentService').resolveContract(params.tradingsymbol, params.exchange)?.lotSize || params.lotsize) : 1;
+      if (!Number.isSafeInteger(lotSize) || lotSize <= 0 || !Number.isSafeInteger(Number(params.quantity)) || Number(params.quantity) <= 0 || Number(params.quantity) % lotSize !== 0) throw new Error('Invalid contract quantity');
+      if (!params.lastmodifiedtime) throw new Error('Fresh last-modified time is required to modify a Motilal order');
       const payload = {
-        uniqueorderid: params.orderid,
-        orderqty: parseInt(params.quantity),
-        price: parseFloat(params.price),
-        ordertype: params.ordertype || 'LIMIT',
-        producttype: params.producttype || 'INTRADAY',
-        orderduration: 'DAY'
+        uniqueorderid: params.orderid, newordertype: params.ordertype || 'LIMIT', neworderduration: 'DAY',
+        newprice: Number(params.price), newtriggerprice: 0, newquantityinlot: Number(params.quantity) / lotSize,
+        newdisclosedquantity: 0, newgoodtilldate: '', lastmodifiedtime: params.lastmodifiedtime,
+        qtytradedtoday: Number(params.qtytradedtoday || 0)
       };
       this.log(`Modifying order ${params.orderid} with Motilal Oswal...`, 'info');
-      const response = await axios.post('https://openapi.motilaloswal.com/rest/trans/v2/modifyorder', payload, this.getConfig(headers));
+      const response = await axios.post('https://openapi.motilaloswal.com/rest/trans/v5/modifyorder', payload, this.getConfig(headers));
       if (response.data && response.data.status === 'SUCCESS') {
         this.log(`Order ${params.orderid} modified successfully!`, 'success', response.data);
         this.clearCache();
@@ -633,8 +650,8 @@ class MotilalService {
       }
     } catch (error) {
       this.handleApiError(error, 'Order modification');
-      const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
-      return { status: false, message: errorMsg };
+      const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
+      return { status: false, message: errorMsg, uncertain: !error.response || Number(error.response.status) >= 500 };
     }
   }
 
@@ -644,7 +661,7 @@ class MotilalService {
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       const payload = {
         clientcode: '', // Not required for normal investor clients
@@ -661,7 +678,7 @@ class MotilalService {
       }
     } catch (error) {
       this.handleApiError(error, 'Order cancellation');
-      const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
+      const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
       return { status: 'ERROR', message: errorMsg };
     }
   }
@@ -672,7 +689,7 @@ class MotilalService {
     }
 
     try {
-      if (!this.session.connected) await this.login();
+      if (!this.session.connected && !await this.login()) throw new Error('Broker login failed');
       const headers = await this.getHeaders();
       const response = await axios.post('https://openapi.motilaloswal.com/rest/login/v5/getprofile', {}, this.getConfig(headers));
       if (response.data && response.data.status === 'SUCCESS' && response.data.data) {

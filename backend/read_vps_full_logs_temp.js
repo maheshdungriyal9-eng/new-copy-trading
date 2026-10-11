@@ -1,10 +1,10 @@
 const { Client } = require('ssh2');
 
 const config = {
-  host: '34.93.162.96',
+  host: process.env.VPS_SSH_HOST,
   port: 22,
-  username: 'tradenterinvest',
-  password: 'mahesh789',
+  username: process.env.VPS_SSH_USER,
+  password: process.env.VPS_SSH_PASSWORD,
   readyTimeout: 30000
 };
 

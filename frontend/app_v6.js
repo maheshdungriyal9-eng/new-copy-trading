@@ -1,17 +1,13 @@
-// Force default user session immediately on script load
-const defaultUser = { id: 'usr_default', name: 'Mahesh Kumar', email: 'mahesh@gmail.com' };
-localStorage.setItem('currentUser', JSON.stringify(defaultUser));
-
-// Intercept global fetch to automatically append X-User-Id header
-const originalFetch = window.fetch;
-window.fetch = function(url, options = {}) {
-  const user = JSON.parse(localStorage.getItem('currentUser')) || defaultUser;
-  if (user && user.id) {
-    options.headers = options.headers || {};
-    options.headers['X-User-Id'] = user.id;
-  }
-  return originalFetch(url, options);
+const originalFetch = window.fetch.bind(window);
+window.fetch = async function(url, options = {}) {
+  const response = await originalFetch(url, { credentials: 'same-origin', ...options });
+  if (response.status === 401 && !String(url).includes('/auth/')) showLogin();
+  return response;
 };
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+}
+function displayPrice(value) { return Number.isFinite(value) && value > 0 ? value.toFixed(2) : '—'; }
 
 // Global error logging to backend
 window.addEventListener('error', function(event) {
@@ -59,7 +55,7 @@ function showNotification(message, type = 'success') {
   if (!container) {
     container = document.createElement('div');
     container.id = 'notification-container';
-    container.style.cssText = 'position: fixed; top: 20px; right: 20px; z-index: 10000; display: flex; flex-direction: column; gap: 10px; pointer-events: none;';
+    container.style.cssText = 'position: fixed; top: 20px; right: 20px; z-index: 1000001; display: flex; flex-direction: column; gap: 10px; pointer-events: none;';
     document.body.appendChild(container);
   }
 
@@ -84,13 +80,13 @@ function showNotification(message, type = 'success') {
 
   if (type === 'success') {
     toast.style.background = 'rgba(16, 185, 129, 0.85)'; // Emerald Green
-    toast.innerHTML = '<i class="fa-solid fa-circle-check" style="color: #34D399;"></i> ' + message;
+    toast.innerHTML = '<i class="fa-solid fa-circle-check" style="color: #34D399;"></i> ' + escapeHtml(message);
   } else if (type === 'error') {
     toast.style.background = 'rgba(239, 68, 68, 0.85)'; // Red
-    toast.innerHTML = '<i class="fa-solid fa-circle-xmark" style="color: #F87171;"></i> ' + message;
+    toast.innerHTML = '<i class="fa-solid fa-circle-xmark" style="color: #F87171;"></i> ' + escapeHtml(message);
   } else {
     toast.style.background = 'rgba(59, 130, 246, 0.85)'; // Blue
-    toast.innerHTML = '<i class="fa-solid fa-circle-info" style="color: #60A5FA;"></i> ' + message;
+    toast.innerHTML = '<i class="fa-solid fa-circle-info" style="color: #60A5FA;"></i> ' + escapeHtml(message);
   }
 
   container.appendChild(toast);
@@ -153,6 +149,7 @@ window.addEventListener('popstate', (e) => {
 });
 let portfolioPoller = null;
 let isFetchingPortfolio = false;
+let portfolioGeneration = 0;
 let positionsTotalBarExpanded = false;
 let currentSelectedStock = null;
 let currentOrdersData = { pending: [], executed: [] };
@@ -176,7 +173,7 @@ function getWatchlistPrice(symbol) {
     hyphenated,
     stripped,
     `${stripped}-EQ`,
-    `${cleanSym}-EQ`
+    `${escapeHtml(cleanSym)}-EQ`
   ];
   
   for (const cand of candidates) {
@@ -190,7 +187,7 @@ function getWatchlistPrice(symbol) {
 function getLiveOrStaticLtp(hold) {
   const symbol = hold.tradingsymbol || hold.scripname || '';
   const priceData = getWatchlistPrice(symbol);
-  if (priceData && priceData.ltp !== undefined) {
+  if (priceData && priceData.isLive && Number(priceData.ltp) > 0) {
     return parseFloat(priceData.ltp);
   }
   return parseFloat(hold.ltp || hold.LTP || hold.closeprice || hold.closePrice || hold.rate || hold.averageprice || hold.buyavgprice || 0);
@@ -276,517 +273,78 @@ let confirmationResult = null;
 
 async function initFirebase() {
   try {
-    const res = await originalFetch(`${API_BASE}/auth/firebase-config`);
-    const config = await res.json();
-    if (config && config.apiKey) {
+    const response = await originalFetch(API_BASE + '/auth/firebase-config');
+    const config = await response.json();
+    if (config.apiKey && typeof firebase !== 'undefined') {
       firebase.initializeApp(config);
       firebaseInitialized = true;
-      console.log('[Auth] Firebase initialized successfully.');
-      
-      // Initialize invisible Recaptcha
-      window.recaptchaVerifier = new firebase.auth.RecaptchaVerifier('recaptcha-container', {
-        'size': 'invisible',
-        'callback': (response) => {
-          console.log('[Auth] Recaptcha solved.');
-        }
-      });
-    } else {
-      console.log('[Auth] No Firebase configuration found. Running in MOCK mode.');
     }
-  } catch (e) {
-    console.error('[Auth] Failed to initialize Firebase:', e);
-  }
+  } catch (error) { console.warn('Google sign-in is unavailable'); }
 }
-
-// Initialize App
-document.addEventListener('DOMContentLoaded', () => {
+function showLogin() {
+  localStorage.removeItem('currentUser');
+  for (const timer of [logPoller, pricePoller, portfolioPoller]) clearInterval(timer);
+  logPoller = pricePoller = portfolioPoller = null;
+  if (typeof priceWebSocket !== 'undefined' && priceWebSocket) { priceWebSocket.onclose = null; priceWebSocket.close(); priceWebSocket = null; }
+  const auth = document.getElementById('auth-screen');
+  if (auth) { auth.classList.remove('hidden'); auth.style.display = ''; }
+  document.querySelector('.app-container')?.setAttribute('inert', '');
+  updateUserDisplay(null);
+}
+document.addEventListener('DOMContentLoaded', async () => {
   setupTabs();
   setupMobileNav();
   setupEventListeners();
-  setupOTPAutoAdvance();
   setupPullToRefresh();
   initSwipeNavigation();
-  
-  // Initialize Firebase Auth (available in background if needed later)
-  initFirebase();
-  
-  // Bypass login screen by forcing default user session
-  localStorage.setItem('currentUser', JSON.stringify(defaultUser));
-  
-  const authEl = document.getElementById('auth-screen');
-  if (authEl) {
-    authEl.classList.add('hidden');
-    authEl.style.display = 'none';
-  }
-  updateUserDisplay(defaultUser);
-  loadData();
-  startLogPolling();
-  startPricePolling();
-  
-  // Initialize element locations based on screen size
   relocateElements();
   window.addEventListener('resize', relocateElements);
-  
-  // Initialize bottom sheet swipe-to-dismiss handlers
   initBottomSheetSwipeDismiss();
-});
-
-// Authentication UI & Actions
-window.switchAuthTab = function(tab) {
-  const tabPhone = document.getElementById('auth-tab-phone');
-  const tabGoogle = document.getElementById('auth-tab-google');
-  const sectionPhone = document.getElementById('auth-phone-section');
-  const sectionGoogle = document.getElementById('auth-google-section');
-
-  if (tab === 'phone') {
-    if (tabPhone) tabPhone.classList.add('active');
-    if (tabGoogle) tabGoogle.classList.remove('active');
-    if (sectionPhone) sectionPhone.classList.remove('hidden');
-    if (sectionGoogle) sectionGoogle.classList.add('hidden');
-  } else {
-    if (tabPhone) tabPhone.classList.remove('active');
-    if (tabGoogle) tabGoogle.classList.add('active');
-    if (sectionPhone) sectionPhone.classList.add('hidden');
-    if (sectionGoogle) sectionGoogle.classList.remove('hidden');
-  }
-};
-
-window.backToPhoneInput = function() {
-  const stepPhone = document.getElementById('auth-step-phone');
-  const stepOtp = document.getElementById('auth-step-otp');
-  if (stepPhone) stepPhone.classList.remove('hidden');
-  if (stepOtp) stepOtp.classList.add('hidden');
-};
-
-// Send OTP
-window.lastReceivedOTP = null;
-let isAutoTypingOTP = false;
-let smsToastTimeout = null;
-
-function playNotificationBeep() {
+  showLogin();
+  initFirebase();
   try {
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContext) return;
-    const ctx = new AudioContext();
-    
-    // Double tone chime beep
-    const osc1 = ctx.createOscillator();
-    const osc2 = ctx.createOscillator();
-    const gain = ctx.createGain();
-    
-    osc1.type = 'sine';
-    osc1.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-    osc1.frequency.setValueAtTime(880.00, ctx.currentTime + 0.08); // A5
-    
-    osc2.type = 'triangle';
-    osc2.frequency.setValueAtTime(587.33, ctx.currentTime);
-    osc2.frequency.setValueAtTime(880.00, ctx.currentTime + 0.08);
-    
-    gain.gain.setValueAtTime(0.08, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-    
-    osc1.connect(gain);
-    osc2.connect(gain);
-    gain.connect(ctx.destination);
-    
-    osc1.start();
-    osc2.start();
-    osc1.stop(ctx.currentTime + 0.35);
-    osc2.stop(ctx.currentTime + 0.35);
-  } catch (e) {
-    console.log('Audio beep blocked or unsupported:', e);
-  }
-}
-
-window.triggerAutoOTPDetect = function() {
-  if (isAutoTypingOTP || !window.lastReceivedOTP) return;
-  isAutoTypingOTP = true;
-
-  // Dismiss Toast with animation
-  window.dismissSMSToast();
-
-  const otp = window.lastReceivedOTP;
-  const digits = document.querySelectorAll('.otp-digit');
-  
-  // Clear digits first
-  digits.forEach(el => el.value = '');
-
-  // Sequential typing animation
-  let index = 0;
-  function typeNextDigit() {
-    if (index < 6) {
-      const input = digits[index];
-      input.focus();
-      input.value = otp[index];
-      
-      // Trigger scaling animation in styling
-      input.style.transform = 'scale(1.15)';
-      input.style.borderColor = 'var(--cyan)';
-      input.style.background = 'rgba(0, 212, 255, 0.08)';
-      
-      setTimeout(() => {
-        input.style.transform = 'scale(1)';
-        input.style.borderColor = 'var(--border-focus)';
-        input.style.background = 'rgba(13, 148, 136, 0.05)';
-      }, 100);
-
-      index++;
-      setTimeout(typeNextDigit, 150); // 150ms delay per digit
-    } else {
-      isAutoTypingOTP = false;
-      window.dismissAutofillSuggestion();
-      // Auto verify code
-      window.handleVerifyOTP();
-    }
-  }
-
-  setTimeout(typeNextDigit, 200);
+    const response = await originalFetch(API_BASE + '/auth/me');
+    if (response.ok) loginUser((await response.json()).user);
+  } catch (error) { showNotification('Cannot reach the server', 'error'); }
+});
+window.handleAdminLogin = async function(event) {
+  event.preventDefault();
+  const input = document.getElementById('admin-password');
+  try {
+    const response = await originalFetch(API_BASE + '/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: input.value }) });
+    const data = await response.json();
+    input.value = '';
+    if (!response.ok) throw new Error(data.error || 'Login failed');
+    loginUser(data.user);
+  } catch (error) { showNotification(error.message, 'error'); }
 };
-
-window.dismissSMSToast = function() {
-  const toast = document.getElementById('sms-toast');
-  if (toast) {
-    toast.classList.add('hidden');
-  }
-  if (smsToastTimeout) {
-    clearTimeout(smsToastTimeout);
-    smsToastTimeout = null;
-  }
-};
-
-window.dismissAutofillSuggestion = function() {
-  const suggestion = document.getElementById('otp-autofill-suggestion');
-  if (suggestion) {
-    suggestion.classList.add('hidden');
-  }
-};
-
-window.handleSendOTP = async function() {
-  const phoneInput = document.getElementById('auth-phone-input');
-  const phone = phoneInput ? phoneInput.value.trim() : '';
-  if (!/^\d{10}$/.test(phone)) {
-    alert('Please enter a valid 10-digit mobile number.');
-    return;
-  }
-
-  const btn = document.getElementById('btn-send-otp');
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sending OTP...';
-  }
-
-  if (firebaseInitialized) {
-    try {
-      const phoneNumber = '+91' + phone;
-      const appVerifier = window.recaptchaVerifier;
-      const confirmation = await firebase.auth().signInWithPhoneNumber(phoneNumber, appVerifier);
-      confirmationResult = confirmation;
-
-      const stepPhone = document.getElementById('auth-step-phone');
-      const stepOtp = document.getElementById('auth-step-otp');
-      if (stepPhone) stepPhone.classList.add('hidden');
-      if (stepOtp) stepOtp.classList.remove('hidden');
-
-      // Clear any previous values and focus on the first OTP digit
-      const digits = document.querySelectorAll('.otp-digit');
-      digits.forEach(el => el.value = '');
-      if (digits.length > 0) {
-        setTimeout(() => digits[0].focus(), 150);
-      }
-      console.log('[Auth] Firebase OTP code sent successfully.');
-    } catch (err) {
-      console.error('[Auth] Firebase signInWithPhoneNumber failed:', err);
-      alert('Error sending OTP via Firebase: ' + (err.message || err));
-      if (btn) {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Get OTP Code';
-      }
-    }
-  } else {
-    // Mock OTP Fallback
-    try {
-      const response = await originalFetch(`${API_BASE}/auth/send-otp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone })
-      });
-      if (response.ok) {
-        const data = await response.json();
-        window.lastReceivedOTP = data.otp; // Cache the OTP code
-
-        const stepPhone = document.getElementById('auth-step-phone');
-        const stepOtp = document.getElementById('auth-step-otp');
-        if (stepPhone) stepPhone.classList.add('hidden');
-        if (stepOtp) stepOtp.classList.remove('hidden');
-
-        // Clear any previous values and focus on the first OTP digit
-        const digits = document.querySelectorAll('.otp-digit');
-        digits.forEach(el => el.value = '');
-        if (digits.length > 0) {
-          setTimeout(() => digits[0].focus(), 150);
-        }
-
-        // Show iOS/Android mock SMS Toast
-        const toast = document.getElementById('sms-toast');
-        const smsCode = document.getElementById('sms-otp-code');
-        if (toast && smsCode && window.lastReceivedOTP) {
-          smsCode.textContent = window.lastReceivedOTP;
-          toast.classList.remove('hidden');
-          
-          // Play notification chime sound
-          playNotificationBeep();
-
-          // Auto dismiss after 10 seconds
-          if (smsToastTimeout) clearTimeout(smsToastTimeout);
-          smsToastTimeout = setTimeout(() => {
-            window.dismissSMSToast();
-          }, 10000);
-        }
-
-        // Show Autofill suggestion pill
-        const suggestion = document.getElementById('otp-autofill-suggestion');
-        const suggestionVal = document.getElementById('suggestion-otp-val');
-        if (suggestion && suggestionVal && window.lastReceivedOTP) {
-          suggestionVal.textContent = window.lastReceivedOTP;
-          suggestion.classList.remove('hidden');
-        }
-
-      } else {
-        alert('Failed to send OTP. Try again.');
-      }
-    } catch (err) {
-      alert('Connection error.');
-    } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Get OTP Code';
-      }
-    }
-  }
-};
-
-// Setup Modern OTP Input event listeners
-function setupOTPAutoAdvance() {
-  const digits = document.querySelectorAll('.otp-digit');
-  digits.forEach((input, index) => {
-    // Auto advance focus
-    input.addEventListener('input', (e) => {
-      const val = e.target.value;
-      if (val && !/^\d$/.test(val)) {
-        e.target.value = '';
-        return;
-      }
-      
-      if (val && index < digits.length - 1) {
-        digits[index + 1].focus();
-      }
-      
-      // Auto submit check
-      checkAndAutoSubmitOTP();
-    });
-
-    // Backspace focus backward
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Backspace') {
-        if (!e.target.value && index > 0) {
-          digits[index - 1].focus();
-          digits[index - 1].value = '';
-        }
-      }
-    });
-
-    // Paste handling
-    input.addEventListener('paste', (e) => {
-      e.preventDefault();
-      const pastedData = (e.clipboardData || window.clipboardData).getData('text').trim();
-      if (/^\d{6}$/.test(pastedData)) {
-        for (let i = 0; i < digits.length; i++) {
-          digits[i].value = pastedData[i];
-        }
-        digits[digits.length - 1].focus();
-        checkAndAutoSubmitOTP();
-      }
-    });
-  });
-}
-
-function checkAndAutoSubmitOTP() {
-  const digits = document.querySelectorAll('.otp-digit');
-  let otp = '';
-  digits.forEach(el => otp += el.value.trim());
-  if (otp.length === 6) {
-    handleVerifyOTP();
-  }
-}
-
-// Verify OTP
-window.handleVerifyOTP = async function() {
-  const phoneVal = document.getElementById('auth-phone-input') ? document.getElementById('auth-phone-input').value.trim() : '';
-  
-  // Read OTP from the 6 individual inputs
-  const digits = document.querySelectorAll('.otp-digit');
-  let otp = '';
-  digits.forEach(el => otp += el.value.trim());
-
-  if (otp.length < 6) {
-    alert('Please enter the 6-digit OTP code.');
-    return;
-  }
-
-  const btn = document.getElementById('btn-verify-otp');
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verifying...';
-  }
-
-  if (firebaseInitialized && confirmationResult) {
-    try {
-      const result = await confirmationResult.confirm(otp);
-      const user = result.user;
-      
-      const response = await originalFetch(`${API_BASE}/auth/firebase-success`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          phone: user.phoneNumber,
-          email: user.email || '',
-          name: user.displayName || ''
-        })
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        loginUser(data.user);
-      } else {
-        const err = await response.json();
-        alert('Server login failed: ' + (err.error || 'Unknown error'));
-      }
-    } catch (err) {
-      console.error('[Auth] Firebase confirmation failed:', err);
-      alert('Invalid OTP code. Please enter the correct code.');
-      digits.forEach(el => el.value = '');
-      if (digits.length > 0) digits[0].focus();
-    } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-shield-halved"></i> Verify & Login';
-      }
-    }
-  } else {
-    // Mock OTP Verification Fallback
-    try {
-      const response = await originalFetch(`${API_BASE}/auth/verify-otp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: phoneVal, otp })
-      });
-      if (response.ok) {
-        const data = await response.json();
-        loginUser(data.user);
-      } else {
-        alert('Invalid OTP code. Please check your backend terminal console.');
-        // Clear inputs for retry
-        digits.forEach(el => el.value = '');
-        if (digits.length > 0) digits[0].focus();
-      }
-    } catch (err) {
-      alert('Connection error.');
-    } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-shield-halved"></i> Verify & Login';
-      }
-    }
-  }
-};
-
-// Google Login Mock
 window.handleGoogleLogin = async function() {
-  if (firebaseInitialized) {
-    try {
-      const provider = new firebase.auth.GoogleAuthProvider();
-      const result = await firebase.auth().signInWithPopup(provider);
-      const user = result.user;
-      
-      const response = await originalFetch(`${API_BASE}/auth/firebase-success`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: user.email,
-          phone: user.phoneNumber || '',
-          name: user.displayName || ''
-        })
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        loginUser(data.user);
-      } else {
-        const err = await response.json();
-        alert('Server login failed: ' + (err.error || 'Unknown error'));
-      }
-    } catch (err) {
-      console.error('[Auth] Firebase Google login failed:', err);
-      alert('Google Login failed: ' + (err.message || err));
-    }
-  } else {
-    // Mock Google Login Fallback
-    const mockAccounts = [
-      { email: 'mahesh.kumar@gmail.com', name: 'Mahesh Kumar' },
-      { email: 'rishabh.jain@gmail.com', name: 'Rishabh Jain' },
-      { email: 'copytrader.user@gmail.com', name: 'Premium Trader' }
-    ];
-
-    const choice = prompt(
-      "Choose simulated Google Account:\n1. Mahesh Kumar (mahesh.kumar@gmail.com)\n2. Rishabh Jain (rishabh.jain@gmail.com)\n3. Custom Email...",
-      "1"
-    );
-
-    let selectedAccount;
-    if (choice === "1") {
-      selectedAccount = mockAccounts[0];
-    } else if (choice === "2") {
-      selectedAccount = mockAccounts[1];
-    } else if (choice === "3" || (choice && choice.includes("@"))) {
-      let email = choice.includes("@") ? choice : prompt("Enter custom Google email:");
-      if (!email) return;
-      selectedAccount = { email, name: email.split('@')[0] };
-    } else {
-      selectedAccount = mockAccounts[2];
-    }
-
-    try {
-      const response = await originalFetch(`${API_BASE}/auth/google`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(selectedAccount)
-      });
-      if (response.ok) {
-        const data = await response.json();
-        loginUser(data.user);
-      }
-    } catch (e) {
-      alert('Google login connection error.');
-    }
-  }
+  if (!firebaseInitialized) return showNotification('Google sign-in is not configured. Use administrator login.', 'error');
+  try {
+    const result = await firebase.auth().signInWithPopup(new firebase.auth.GoogleAuthProvider());
+    const idToken = await result.user.getIdToken(true);
+    const response = await originalFetch(API_BASE + '/auth/firebase-success', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Login failed');
+    loginUser(data.user);
+  } catch (error) { showNotification(error.message, 'error'); }
 };
-
 function loginUser(user) {
   localStorage.setItem('currentUser', JSON.stringify(user));
-  const authEl = document.getElementById('auth-screen');
-  if (authEl) authEl.classList.add('hidden');
+  const auth = document.getElementById('auth-screen');
+  if (auth) { auth.classList.add('hidden'); auth.style.display = 'none'; }
+  document.querySelector('.app-container')?.removeAttribute('inert');
   updateUserDisplay(user);
   loadData();
   startLogPolling();
   startPricePolling();
+  restoreOrderMonitoring();
 }
-
-window.handleLogout = function() {
-  if (confirm('Are you sure you want to log out?')) {
-    const defaultUser = { id: 'usr_default', name: 'Mahesh Kumar', email: 'mahesh@gmail.com' };
-    localStorage.setItem('currentUser', JSON.stringify(defaultUser));
-    window.location.reload();
-  }
+window.handleLogout = async function() {
+  if (!confirm('Log out?')) return;
+  await originalFetch(API_BASE + '/auth/logout', { method: 'POST' });
+  if (firebaseInitialized) await firebase.auth().signOut();
+  window.location.reload();
 };
 
 function updateUserDisplay(user) {
@@ -1335,7 +893,7 @@ function setupEventListeners() {
       const starColor = isWatchlisted ? '#facc15' : 'var(--text-muted)';
 
       // Calculate price details
-      const priceVal = item.price || 100.00;
+      const priceVal = Number(item.price) || 0;
       const prevCloseVal = item.prevClose || priceVal;
       const diff = priceVal - prevCloseVal;
       const pct = prevCloseVal > 0 ? (diff / prevCloseVal) * 100 : 0;
@@ -1357,15 +915,15 @@ function setupEventListeners() {
       div.innerHTML = `
         <div class="sugg-left" style="display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0;">
           <div style="display: flex; align-items: center; gap: 6px;">
-            <span class="stock-sym" style="font-weight: 600; color: var(--text-primary); font-size: 14px; white-space: nowrap;">${cleanSym}</span>
+            <span class="stock-sym" style="font-weight: 600; color: var(--text-primary); font-size: 14px; white-space: nowrap;">${escapeHtml(cleanSym)}</span>
             <span class="exch-badge" style="background: rgba(255,255,255,0.06); color: var(--text-secondary); font-size: 9px; padding: 1px 4px; border-radius: 4px; font-weight: 600;">${exchange}</span>
             <span class="type-badge" style="background: ${typeBadgeBg}; color: ${typeBadgeColor}; font-size: 9px; padding: 1px 4px; border-radius: 4px; font-weight: 600;">${typeText}</span>
           </div>
-          <span class="stock-name" style="color: var(--text-secondary); opacity: 0.6; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; display: block;">${subtitle}</span>
+          <span class="stock-name" style="color: var(--text-secondary); opacity: 0.6; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; display: block;">${escapeHtml(subtitle)}</span>
         </div>
         
         <div class="sugg-right" style="display: flex; flex-direction: column; gap: 4px; text-align: right; align-items: flex-end; flex-shrink: 0;">
-          <span id="sugg-price-${item.symbol}" style="font-weight: 600; color: var(--text-primary); font-size: 14px; font-family: var(--font-mono);">₹${priceVal.toFixed(2)}</span>
+          <span id="sugg-price-${item.symbol}" style="font-weight: 600; color: var(--text-primary); font-size: 14px; font-family: var(--font-mono);">₹${displayPrice(priceVal)}${item.quoteStatus === 'stale' ? ' (stale)' : ''}</span>
           <span id="sugg-trend-${item.symbol}" class="${trendClass}" style="font-size: 11px; font-weight: 500; font-family: var(--font-mono); white-space: nowrap;">${sign}${Math.abs(diff).toFixed(2)} (${sign}${Math.abs(pct).toFixed(2)}%)</span>
         </div>
 
@@ -1532,7 +1090,7 @@ function renderQuickStatusList() {
     div.className = 'status-item';
     div.innerHTML = `
       <div>
-        <div class="status-item-name">${acc.name}</div>
+        <div class="status-item-name">${escapeHtml(acc.name)}</div>
         <div class="status-item-broker">${brokerName} ${simTag}</div>
       </div>
       <span class="badge ${statusClass}">${statusText}</span>
@@ -1686,7 +1244,7 @@ function renderAccounts() {
       <div class="account-card-header">
         <div class="account-title" style="display: flex; flex-direction: column; gap: 4px;">
           <h3 style="margin: 0; display: flex; align-items: center; gap: 8px;">
-            ${acc.name}
+            ${escapeHtml(acc.name)}
             ${acc.isSimulated ? `<span class="badge" style="background: linear-gradient(135deg, #FF9900, #FF5E00); font-size: 10px; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; text-transform: uppercase;">Paper</span>` : ''}
           </h3>
         </div>
@@ -1696,7 +1254,7 @@ function renderAccounts() {
       <div class="account-details">
         <div class="account-details-row">
           <span>Client / User ID:</span>
-          <span>${acc.isSimulated ? 'SIMULATION' : (acc.clientCode || acc.userId || 'N/A').toUpperCase()}</span>
+          <span>${acc.isSimulated ? 'SIMULATION' : escapeHtml((acc.clientCode || acc.userId || 'N/A').toUpperCase())}</span>
         </div>
         <div class="account-details-row">
           <span>Trading Balance:</span>
@@ -1748,7 +1306,7 @@ function renderAccounts() {
     const rechargeBtn = card.querySelector('.btn-recharge');
     if (rechargeBtn) {
       rechargeBtn.addEventListener('click', async () => {
-        const amountStr = prompt(`Enter new balance amount for simulated account "${acc.name}":`, acc.balance || '1000000');
+        const amountStr = prompt(`Enter new balance amount for simulated account "${escapeHtml(acc.name)}":`, acc.balance || '1000000');
         if (amountStr === null) return; // Cancelled
         const amount = parseFloat(amountStr);
         if (isNaN(amount) || amount < 0) {
@@ -1790,7 +1348,7 @@ function renderAccounts() {
 
     // Delete button click
     card.querySelector('.btn-delete').addEventListener('click', async () => {
-      if (confirm(`Are you sure you want to delete ${acc.name}? All active copy settings mapping this account will also be removed.`)) {
+      if (confirm(`Are you sure you want to delete ${escapeHtml(acc.name)}? All active copy settings mapping this account will also be removed.`)) {
         await fetch(`${API_BASE}/accounts/${acc.id}`, { method: 'DELETE' });
         loadData();
       }
@@ -1874,7 +1432,7 @@ function toggleBrokerFields(broker) {
     document.querySelector('.motilal-fields').classList.add('hidden');
     document.querySelector('.dhan-fields').classList.add('hidden');
     document.getElementById('acc-clientcode').required = !isSimulated;
-    document.getElementById('acc-password-ao').required = !isSimulated;
+    document.getElementById('acc-password-ao').required = !isSimulated && !document.getElementById('acc-id').value;
     document.getElementById('acc-userid').required = false;
     document.getElementById('acc-password-mo').required = false;
     document.getElementById('acc-dhan-clientid').required = false;
@@ -1886,7 +1444,7 @@ function toggleBrokerFields(broker) {
     document.getElementById('acc-clientcode').required = false;
     document.getElementById('acc-password-ao').required = false;
     document.getElementById('acc-userid').required = !isSimulated;
-    document.getElementById('acc-password-mo').required = !isSimulated;
+    document.getElementById('acc-password-mo').required = !isSimulated && !document.getElementById('acc-id').value;
     document.getElementById('acc-dhan-clientid').required = false;
     document.getElementById('acc-dhan-accesstoken').required = false;
   } else if (broker === 'dhan') {
@@ -1898,13 +1456,13 @@ function toggleBrokerFields(broker) {
     document.getElementById('acc-userid').required = false;
     document.getElementById('acc-password-mo').required = false;
     document.getElementById('acc-dhan-clientid').required = !isSimulated;
-    document.getElementById('acc-dhan-accesstoken').required = !isSimulated;
+    document.getElementById('acc-dhan-accesstoken').required = !isSimulated && !document.getElementById('acc-id').value;
   }
 }
 
 function editAccount(acc) {
   document.getElementById('account-form-container').classList.remove('hidden');
-  document.getElementById('form-title').textContent = `Edit Account: ${acc.name}`;
+  document.getElementById('form-title').textContent = `Edit Account: ${escapeHtml(acc.name)}`;
   document.getElementById('acc-id').value = acc.id;
   document.getElementById('acc-name').value = acc.name;
   document.getElementById('acc-role').value = acc.type;
@@ -1967,6 +1525,10 @@ function editAccount(acc) {
     document.getElementById('acc-dhan-accesstoken').value = '';
   }
   
+  for (const id of ['acc-password-ao', 'acc-password-mo', 'acc-dhan-accesstoken', 'acc-apikey', 'acc-apisecret', 'acc-totpsecret', 'acc-2fa']) {
+    const input = document.getElementById(id);
+    if (input) { input.required = false; input.placeholder = 'Leave blank to keep saved credential'; }
+  }
   document.getElementById('account-form-container').scrollIntoView({ behavior: 'smooth' });
 }
 
@@ -2007,7 +1569,7 @@ async function handleAccountSubmit(e) {
     isSimulated,
     apiKey: isSimulated ? '' : document.getElementById('acc-apikey').value,
     totpSecret: isSimulated ? '' : document.getElementById('acc-totpsecret').value,
-    proxyUrl: finalProxyUrl
+    ...(finalProxyUrl ? { proxyUrl: finalProxyUrl } : {})
   };
 
   if (isSimulated) {
@@ -2259,7 +1821,7 @@ window.renderGroups = function() {
         childName = `${childName} (${broker})`;
       }
       const inactiveStyle = c.active === false ? 'style="color: var(--text-muted); text-decoration: line-through;"' : '';
-      childrenHtml += `<li ${inactiveStyle}>${childName} <strong style="color: var(--cyan);">${c.multiplier}x</strong></li>`;
+      childrenHtml += `<li ${inactiveStyle}>${escapeHtml(childName)} <strong style="color: var(--cyan);">${c.multiplier}x</strong></li>`;
     });
 
     if (g.children.length === 0) {
@@ -2274,8 +1836,8 @@ window.renderGroups = function() {
     card.innerHTML = `
       <div style="display: flex; justify-content: space-between; align-items: start;">
         <div>
-          <h3 style="font-size: 16px; font-weight: 700; color: var(--text-primary); margin: 0;">${g.name}</h3>
-          <span style="font-size: 12px; color: var(--text-muted); display: block; margin-top: 4px;">Master: <strong style="color: var(--primary); font-size: 13px; font-weight: 600;">${masterName}</strong></span>
+          <h3 style="font-size: 16px; font-weight: 700; color: var(--text-primary); margin: 0;">${escapeHtml(g.name)}</h3>
+          <span style="font-size: 12px; color: var(--text-muted); display: block; margin-top: 4px;">Master: <strong style="color: var(--primary); font-size: 13px; font-weight: 600;">${escapeHtml(masterName)}</strong></span>
         </div>
         <label class="switch">
           <input type="checkbox" onchange="toggleGroupActive('${g.id}', this.checked)" ${g.active ? 'checked' : ''}>
@@ -2393,7 +1955,7 @@ function populateGroupChildrenList(selectedChildren) {
       <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; flex: 1; min-width: 0; font-size: 13px; user-select: none; color: var(--text-primary); margin: 0;">
         <input type="checkbox" class="child-check" value="${acc.id}" ${checked} style="cursor: pointer; width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--primary);">
         <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px;">
-          <div style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-primary);">${acc.name}</div>
+          <div style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-primary);">${escapeHtml(acc.name)}</div>
           <div style="font-size: 10px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${acc.broker === 'angel_one' ? 'Angel' : (acc.broker === 'dhan' ? 'Dhan' : 'Motilal')}</div>
         </div>
       </label>
@@ -2596,11 +2158,12 @@ async function handleSimulatorSubmit(e) {
     symboltoken: document.getElementById('sim-token').value,
     producttype: document.getElementById('sim-product').value,
     transactiontype,
-    quantity: parseInt(document.getElementById('sim-qty').value),
+    quantity: Number(document.getElementById('sim-qty').value),
     ordertype,
     price: ordertype === 'LIMIT' ? parseFloat(document.getElementById('sim-price').value) : 0
   };
 
+  payload.requestId = getOrderRequestId(payload);
   try {
     const response = await fetch(`${API_BASE}/execute-trade`, {
       method: 'POST',
@@ -2617,16 +2180,10 @@ async function handleSimulatorSubmit(e) {
         btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Execute Order & Copy';
         return;
       }
-      // Small timeout to let operations run before refreshing logs
-      setTimeout(() => {
-        fetchLogs();
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Execute Order & Copy';
-        // Increment copiers counter for UI flavor
-        const copiedCounter = document.getElementById('stat-copied-trades');
-        const activeLinkages = mappings.filter(m => m.masterId === masterId && m.active).length;
-        copiedCounter.textContent = parseInt(copiedCounter.textContent) + 1 + activeLinkages;
-      }, 500);
+      clearOrderRequestId();
+      monitorOrder(data.jobId);
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Execute Order & Copy';
     } else {
       const err = await response.json();
       alert(`Execution Error: ${err.error || err.message || 'Server error'}`);
@@ -2677,13 +2234,13 @@ function renderLogs(logs) {
       
       let detailsHtml = '';
       if (log.details) {
-        detailsHtml = `<pre class="console-details">${JSON.stringify(log.details, null, 2)}</pre>`;
+        detailsHtml = `<pre class="console-details">${escapeHtml(JSON.stringify(log.details, null, 2))}</pre>`;
       }
 
       div.innerHTML = `
         <span class="console-time">[${timeStr}]</span>
-        <span class="console-tag ${tagClass}">${log.type}</span>
-        <span style="font-weight: 500;">${log.accountName ? `[${log.accountName}] ` : ''}${log.message}</span>
+        <span class="console-tag ${tagClass}">${escapeHtml(log.type)}</span>
+        <span style="font-weight: 500;">${log.accountName ? '[' + escapeHtml(log.accountName) + '] ' : ''}${escapeHtml(log.message)}</span>
         ${detailsHtml}
       `;
       container.appendChild(div);
@@ -2832,6 +2389,7 @@ function getSkeletonRows(cols, rows = 3) {
 
 async function refreshPortfolio(isBackground = false) {
   if (isBackground && isFetchingPortfolio) return;
+  const generation = ++portfolioGeneration;
   isFetchingPortfolio = true;
 
   const accountId = document.getElementById('portfolio-account').value;
@@ -2859,7 +2417,7 @@ async function refreshPortfolio(isBackground = false) {
       pendingContainer.innerHTML = '<tr><td colspan="10" style="text-align: center; color: var(--text-muted);">Select an account first.</td></tr>';
       historyContainer.innerHTML = '<tr><td colspan="10" style="text-align: center; color: var(--text-muted);">Select an account first.</td></tr>';
     }
-    isFetchingPortfolio = false;
+    if (generation === portfolioGeneration) isFetchingPortfolio = false;
     return;
   }
 
@@ -2868,6 +2426,7 @@ async function refreshPortfolio(isBackground = false) {
     if (!response.ok) throw new Error('Failed to load portfolio statistics.');
     
     const data = await response.json();
+    if (generation !== portfolioGeneration || document.getElementById('portfolio-account').value !== accountId) return;
 
     // Render Funds
     if (data.funds) {
@@ -3031,20 +2590,20 @@ async function refreshPortfolio(isBackground = false) {
         const tr = document.createElement('tr');
         const badgeClass = (o.transactiontype || '').toLowerCase() === 'buy' ? 'status-confirm' : 'status-rejected';
         tr.innerHTML = `
-          <td><span style="font-family: var(--font-mono); font-size:12px;">${o.orderid}</span></td>
-          <td><strong>${o.tradingsymbol}</strong></td>
-          <td><span class="badge" style="background: rgba(255,255,255,0.05);">${o.exchange}</span></td>
-          <td><span class="badge ${badgeClass}">${o.transactiontype}</span></td>
-          <td>${o.ordertype}</td>
-          <td>${o.producttype}</td>
-          <td>${o.quantity}</td>
+          <td><span style="font-family: var(--font-mono); font-size:12px;">${escapeHtml(o.orderid)}</span></td>
+          <td><strong>${escapeHtml(o.tradingsymbol)}</strong></td>
+          <td><span class="badge" style="background: rgba(255,255,255,0.05);">${escapeHtml(o.exchange)}</span></td>
+          <td><span class="badge ${badgeClass}">${escapeHtml(o.transactiontype)}</span></td>
+          <td>${escapeHtml(o.ordertype)}</td>
+          <td>${escapeHtml(o.producttype)}</td>
+          <td>${escapeHtml(o.quantity)}</td>
           <td>₹ ${parseFloat(o.price || 0).toFixed(2)}</td>
-          <td><span class="badge status-pending">${o.status}</span></td>
+          <td><span class="badge status-pending">${escapeHtml(o.status)}</span></td>
           <td style="text-align: center; white-space: nowrap;">
-            <button class="btn btn-primary btn-modify-order" style="padding: 4px 10px; font-size: 11px; margin-right: 4px;" data-id="${o.orderid}">
+            <button class="btn btn-primary btn-modify-order" style="padding: 4px 10px; font-size: 11px; margin-right: 4px;" data-id="${escapeHtml(o.orderid)}">
               <i class="fa-solid fa-pen-to-square"></i> Edit
             </button>
-            <button class="btn btn-danger btn-cancel-order" style="padding: 4px 10px; font-size: 11px;" data-id="${o.orderid}">
+            <button class="btn btn-danger btn-cancel-order" style="padding: 4px 10px; font-size: 11px;" data-id="${escapeHtml(o.orderid)}">
               <i class="fa-solid fa-xmark"></i> Cancel
             </button>
           </td>
@@ -3055,7 +2614,7 @@ async function refreshPortfolio(isBackground = false) {
         });
 
         tr.querySelector('.btn-cancel-order').addEventListener('click', async () => {
-          if (confirm(`Cancel pending order ${o.orderid}?`)) {
+          if (confirm(`Cancel pending order ${escapeHtml(o.orderid)}?`)) {
             try {
               const res = await fetch(`${API_BASE}/orders/cancel`, {
                 method: 'POST',
@@ -3094,16 +2653,16 @@ async function refreshPortfolio(isBackground = false) {
         const badgeClass = (o.transactiontype || '').toLowerCase() === 'buy' ? 'status-confirm' : 'status-rejected';
         const statusClass = `status-${(o.status || '').toLowerCase()}`;
         tr.innerHTML = `
-          <td><span style="font-family: var(--font-mono); font-size:12px;">${o.orderid}</span></td>
-          <td><strong>${o.tradingsymbol}</strong></td>
-          <td><span class="badge" style="background: rgba(255,255,255,0.05);">${o.exchange}</span></td>
-          <td><span class="badge ${badgeClass}">${o.transactiontype}</span></td>
-          <td>${o.ordertype}</td>
-          <td>${o.producttype}</td>
-          <td>${o.quantity}</td>
+          <td><span style="font-family: var(--font-mono); font-size:12px;">${escapeHtml(o.orderid)}</span></td>
+          <td><strong>${escapeHtml(o.tradingsymbol)}</strong></td>
+          <td><span class="badge" style="background: rgba(255,255,255,0.05);">${escapeHtml(o.exchange)}</span></td>
+          <td><span class="badge ${badgeClass}">${escapeHtml(o.transactiontype)}</span></td>
+          <td>${escapeHtml(o.ordertype)}</td>
+          <td>${escapeHtml(o.producttype)}</td>
+          <td>${escapeHtml(o.quantity)}</td>
           <td>₹ ${parseFloat(o.price || 0).toFixed(2)}</td>
-          <td><span class="badge ${statusClass}">${o.status}</span></td>
-          <td style="font-size: 11px; color: var(--text-secondary);">${o.updatetime}</td>
+          <td><span class="badge ${statusClass}">${escapeHtml(o.status)}</span></td>
+          <td style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(o.updatetime)}</td>
         `;
         historyContainer.appendChild(tr);
       });
@@ -3121,7 +2680,7 @@ async function refreshPortfolio(isBackground = false) {
     // Apply live prices immediately on load
     updateLiveHoldingsPrices();
 
-    isFetchingPortfolio = false;
+    if (generation === portfolioGeneration) isFetchingPortfolio = false;
   } catch (err) {
     posContainer.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--red);">${err.message}</td></tr>`;
     holdContainer.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--red);">${err.message}</td></tr>`;
@@ -3144,7 +2703,7 @@ async function refreshPortfolio(isBackground = false) {
     if (mobPortPend) mobPortPend.innerHTML = errHtml;
     if (mobPortExec) mobPortExec.innerHTML = errHtml;
     
-    isFetchingPortfolio = false;
+    if (generation === portfolioGeneration) isFetchingPortfolio = false;
   }
 }
 
@@ -3259,7 +2818,7 @@ async function handleModifyOrder(o, accountId) {
   const currentQty = o.quantity;
   const currentPrice = o.price;
   
-  const newQtyStr = prompt(`Modify Order ${o.orderid} (${o.tradingsymbol})\nEnter new quantity:`, currentQty);
+  const newQtyStr = prompt(`Modify Order ${escapeHtml(o.orderid)} (${escapeHtml(o.tradingsymbol)})\nEnter new quantity:`, currentQty);
   if (newQtyStr === null) return; 
   const newQty = parseInt(newQtyStr);
   if (isNaN(newQty) || newQty <= 0) {
@@ -3267,7 +2826,7 @@ async function handleModifyOrder(o, accountId) {
     return;
   }
   
-  const newPriceStr = prompt(`Modify Order ${o.orderid} (${o.tradingsymbol})\nEnter new price:`, currentPrice);
+  const newPriceStr = prompt(`Modify Order ${escapeHtml(o.orderid)} (${escapeHtml(o.tradingsymbol)})\nEnter new price:`, currentPrice);
   if (newPriceStr === null) return; 
   const newPrice = parseFloat(newPriceStr);
   if (isNaN(newPrice) || newPrice < 0) {
@@ -3488,8 +3047,8 @@ function renderWatchlistTable() {
   watchlistSymbols.forEach((symbol, index) => {
     let row = document.getElementById(`wl-row-${symbol}`);
     
-    const data = watchlistPrices[symbol] || { ltp: 100.00, change: 'flat', prevClose: 100.00 };
-    const priceDisplay = data.ltp > 0 ? `₹${data.ltp.toFixed(2)}` : 'Loading...';
+    const data = watchlistPrices[symbol] || { ltp: 0, change: 'flat', prevClose: 0 };
+    const priceDisplay = data.ltp > 0 ? `₹${data.ltp.toFixed(2)}${data.quoteStatus === 'stale' ? ' (stale)' : ''}` : 'Unavailable';
     
     const prevClose = data.prevClose || data.ltp;
     const diff = data.ltp - prevClose;
@@ -3544,11 +3103,11 @@ function renderWatchlistTable() {
         <div class="wl-item-left" onclick="openStockDetails('${symbol}')" style="display:flex; justify-content:space-between; width:100%; align-items:center; cursor:pointer;">
           <div class="wl-info-block" style="display:flex; flex-direction:column; gap:4px; flex: 1; min-width: 0;">
             <div style="display:flex; align-items:center; gap:6px;">
-              <span class="wl-sym" style="font-weight: 600; color: var(--text-primary); font-size: 14px; white-space: nowrap;">${cleanSym}</span>
+              <span class="wl-sym" style="font-weight: 600; color: var(--text-primary); font-size: 14px; white-space: nowrap;">${escapeHtml(cleanSym)}</span>
               <span class="wl-exchange-badge" style="background: rgba(255,255,255,0.06); color: var(--text-secondary); font-size: 9px; padding: 1px 4px; border-radius: 4px; font-weight: 600; width:fit-content; line-height: 1.2;">${exchange}</span>
               <span class="wl-type-badge" style="background: ${typeBadgeBg}; color: ${typeBadgeColor}; font-size: 9px; padding: 1px 4px; border-radius: 4px; font-weight: 600; width:fit-content; line-height: 1.2;">${typeText}</span>
             </div>
-            <span class="wl-company" style="color: var(--text-secondary); opacity: 0.6; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; display: block;">${subtitle}</span>
+            <span class="wl-company" style="color: var(--text-secondary); opacity: 0.6; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; display: block;">${escapeHtml(subtitle)}</span>
           </div>
           
           <div class="wl-price-block" style="text-align:right; display:flex; flex-direction:column; gap:4px; flex-shrink: 0; align-items: flex-end;">
@@ -3657,11 +3216,11 @@ function handleWatchlistPricesData(data) {
   const marketStatusBadge = document.getElementById('market-status-badge');
   if (marketStatusBadge) {
     if (marketOpen) {
-      marketStatusBadge.textContent = 'OPEN';
+      marketStatusBadge.textContent = 'Scheduled open';
       marketStatusBadge.className = 'text-green';
       marketStatusBadge.style.fontWeight = '600';
     } else {
-      marketStatusBadge.textContent = 'CLOSED (Showing Last Close)';
+      marketStatusBadge.textContent = 'Scheduled closed — check quote timestamps';
       marketStatusBadge.className = 'text-red';
       marketStatusBadge.style.fontWeight = '600';
     }
@@ -3678,6 +3237,11 @@ function handleWatchlistPricesData(data) {
     
     // Update global price state
     watchlistPrices[symbol] = priceData;
+    if (!(Number(priceData.ltp) > 0)) {
+      const priceElement = document.getElementById('wl-price-' + symbol);
+      if (priceElement) priceElement.textContent = 'Unavailable';
+      continue;
+    }
 
     // Update custom chart series if active
     if (typeof window.updateLwChartLiveTick === 'function') {
@@ -3746,12 +3310,12 @@ function handleWatchlistPricesData(data) {
       const orderModal = document.getElementById('order-placement-modal');
       if (orderModal && !orderModal.classList.contains('hidden')) {
         const nsePriceVal = priceData.ltp;
-        const bsePriceVal = priceData.ltp - 0.25;
+        const bsePriceVal = currentOrderExchange === 'BSE' ? priceData.ltp : 0;
         
         const nseEl = document.getElementById('order-nse-price');
         const bseEl = document.getElementById('order-bse-price');
         if (nseEl) nseEl.textContent = `₹${nsePriceVal.toFixed(2)}`;
-        if (bseEl) bseEl.textContent = `₹${bsePriceVal.toFixed(2)}`;
+        if (bseEl) bseEl.textContent = '₹' + displayPrice(bsePriceVal);
         
         const prevCloseVal = priceData.prevClose || nsePriceVal;
         const diffVal = nsePriceVal - prevCloseVal;
@@ -3774,54 +3338,21 @@ function handleWatchlistPricesData(data) {
   }
 
   // Update NIFTY and SENSEX indices from backend prices with flash ticks
-  if (prices['NIFTY-EQ']) {
-    const niftyVal = prices['NIFTY-EQ'].ltp;
-    const niftyLtpEl = document.getElementById('index-nifty-ltp');
-    if (niftyLtpEl) {
-      const prevNiftyVal = parseFloat(niftyLtpEl.textContent.replace(/,/g, '')) || 0;
-      niftyLtpEl.textContent = niftyVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      if (prevNiftyVal && prevNiftyVal !== niftyVal) {
-        const prevNiftyClose = prices['NIFTY-EQ'].prevClose || niftyVal;
-        const isUp = niftyVal >= prevNiftyClose;
-        niftyLtpEl.className = `index-ltp ${isUp ? 'text-green' : 'text-red'}`;
-      }
+  for (const [symbol, label] of [['NIFTY-EQ', 'nifty'], ['SENSEX-EQ', 'sensex']]) {
+    const quote = prices[symbol];
+    if (!quote) continue;
+    const price = document.getElementById('index-' + label + '-ltp');
+    const change = document.getElementById('index-' + label + '-change');
+    if (price) {
+      price.textContent = quote.ltp > 0 ? quote.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (quote.quoteStatus === 'stale' ? ' (stale)' : '') : 'Unavailable';
+      price.title = quote.updatedAt ? 'Quote received: ' + new Date(quote.updatedAt).toLocaleString() : 'No verified quote';
     }
-    
-    if (typeof window.updateLwChartLiveTick === 'function') {
-      window.updateLwChartLiveTick('NIFTY', niftyVal);
+    if (change) {
+      const difference = quote.ltp - quote.prevClose;
+      change.textContent = quote.ltp > 0 && quote.prevClose > 0 ? difference.toFixed(2) + ' (' + (difference / quote.prevClose * 100).toFixed(2) + '%)' : '—';
+      change.className = difference >= 0 ? 'index-change text-green' : 'index-change text-red';
     }
-    
-    const niftyChangeEl = document.getElementById('index-nifty-change');
-    if (niftyChangeEl) {
-      const prevNiftyClose = prices['NIFTY-EQ'].prevClose || niftyVal;
-      const diff = niftyVal - prevNiftyClose;
-      const pct = (prevNiftyClose > 0) ? (diff / prevNiftyClose) * 100 : 0;
-      niftyChangeEl.textContent = `${diff >= 0 ? '+' : ''}${diff.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${diff >= 0 ? '+' : ''}${pct.toFixed(2)}%)`;
-      niftyChangeEl.className = diff >= 0 ? 'index-change text-green' : 'index-change text-red';
-    }
-  }
-  
-  if (prices['SENSEX-EQ']) {
-    const sensexVal = prices['SENSEX-EQ'].ltp;
-    const sensexLtpEl = document.getElementById('index-sensex-ltp');
-    if (sensexLtpEl) {
-      const prevSensexVal = parseFloat(sensexLtpEl.textContent.replace(/,/g, '')) || 0;
-      sensexLtpEl.textContent = sensexVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      if (prevSensexVal && prevSensexVal !== sensexVal) {
-        const prevSensexClose = prices['SENSEX-EQ'].prevClose || sensexVal;
-        const isUp = sensexVal >= prevSensexClose;
-        sensexLtpEl.className = `index-ltp ${isUp ? 'text-green' : 'text-red'}`;
-      }
-    }
-    
-    const sensexChangeEl = document.getElementById('index-sensex-change');
-    if (sensexChangeEl) {
-      const prevSensexClose = prices['SENSEX-EQ'].prevClose || sensexVal;
-      const diff = sensexVal - prevSensexClose;
-      const pct = (prevSensexClose > 0) ? (diff / prevSensexClose) * 100 : 0;
-      sensexChangeEl.textContent = `${diff >= 0 ? '+' : ''}${diff.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${diff >= 0 ? '+' : ''}${pct.toFixed(2)}%)`;
-      sensexChangeEl.className = diff >= 0 ? 'index-change text-green' : 'index-change text-red';
-    }
+    if (quote.isLive && typeof window.updateLwChartLiveTick === 'function') window.updateLwChartLiveTick(symbol.replace('-EQ', ''), quote.ltp);
   }
 
   // Update live holdings prices from the newly received ticks
@@ -3829,7 +3360,6 @@ function handleWatchlistPricesData(data) {
 }
 
 async function pollWatchlistPrices() {
-  if (watchlistSymbols.length === 0 && !currentSelectedStock) return;
   try {
     const activeSymbol = currentSelectedStock ? currentSelectedStock.symbol : '';
     const response = await fetch(`${API_BASE}/watchlist/prices?t=${Date.now()}&active=${encodeURIComponent(activeSymbol)}`, { cache: 'no-store' });
@@ -3877,11 +3407,12 @@ function startPricePolling() {
     wsUrl = `${protocol}//${host}${base}`;
   }
   
-  wsUrl = `${wsUrl}/api/watchlist/stream?active=${encodeURIComponent(activeSymbol)}`;
+  wsUrl = `${wsUrl}/watchlist/stream?active=${encodeURIComponent(activeSymbol)}`;
   console.log('[WS] Connecting to watchlist price WebSocket...', wsUrl);
 
   try {
     priceWebSocket = new WebSocket(wsUrl);
+    const activeSocket = priceWebSocket;
 
     let firstMessageReceived = false;
     const wsTimeout = setTimeout(() => {
@@ -3909,6 +3440,8 @@ function startPricePolling() {
     };
 
     priceWebSocket.onclose = function() {
+      if (priceWebSocket !== activeSocket) return;
+      priceWebSocket = null;
       console.log('[WS] WebSocket connection closed.');
       clearTimeout(wsTimeout);
       // Wait briefly to check if we should fall back
@@ -4031,7 +3564,7 @@ function triggerQuickOrder(symbol, side) {
   fetch(`${API_BASE}/stocks/info?symbol=${encodeURIComponent(symbol)}`)
     .then(res => res.json())
     .then(stockInfo => {
-      const priceData = watchlistPrices[symbol] || { ltp: stockInfo.price || 100.00 };
+      const priceData = watchlistPrices[symbol] || { ltp: stockInfo.price || 0 };
       openOrderPlacement(side, stockInfo, priceData.ltp);
     })
     .catch(err => console.error(err));
@@ -4044,11 +3577,11 @@ function openStockDetails(symbol) {
   
   // Try to use already cached price data or construct a fallback
   const priceData = watchlistPrices[symbol] || {
-    ltp: 100.00,
-    open: 100.00,
-    high: 100.00,
-    low: 100.00,
-    prevClose: 100.00,
+    ltp: 0,
+    open: 0,
+    high: 0,
+    low: 0,
+    prevClose: 0,
     change: 'flat',
     depth: null
   };
@@ -4122,11 +3655,11 @@ function openStockDetails(symbol) {
       
       // Update global price state cache
       watchlistPrices[symbol] = {
-        ltp: stockInfo.price || 100.00,
-        open: stockInfo.open || stockInfo.price || 100.00,
-        high: stockInfo.high || stockInfo.price || 100.00,
-        low: stockInfo.low || stockInfo.price || 100.00,
-        prevClose: stockInfo.prevClose || stockInfo.price || 100.00,
+        ltp: stockInfo.price || 0,
+        open: stockInfo.open || stockInfo.price || 0,
+        high: stockInfo.high || stockInfo.price || 0,
+        low: stockInfo.low || stockInfo.price || 0,
+        prevClose: stockInfo.prevClose || stockInfo.price || 0,
         change: (stockInfo.price >= (stockInfo.prevClose || stockInfo.price)) ? 'up' : 'down',
         depth: stockInfo.depth || priceData.depth
       };
@@ -4203,6 +3736,8 @@ async function openPositionDetails(pos, accountId) {
       };
     }
     
+    stockInfo.exchange = exchange;
+    stockInfo.token = pos.symboltoken || stockInfo.token;
     currentSelectedStock = stockInfo;
     activePosition = { pos, accountId };
     
@@ -4225,11 +3760,11 @@ async function openPositionDetails(pos, accountId) {
     // Header Symbol & Product badge
     const symbolEl = document.getElementById('bs-symbol');
     let prodTag = pos.producttype || 'INTRADAY';
-    if (prodTag === 'MIS' || prodTag === 'Normal') prodTag = 'INTRADAY';
+    if (['MIS', 'VALUEPLUS'].includes(String(prodTag).toUpperCase())) prodTag = 'INTRADAY';
     if (prodTag === 'CNC' || prodTag === 'Delivery') prodTag = 'DELIVERY';
     
     const parsed = parseDisplaySymbol(symbol, cleanCompanyName(stockInfo.name), exchange);
-    symbolEl.innerHTML = `${parsed.baseSymbol} <span class="badge" id="bs-product-badge" style="background: rgba(255,255,255,0.08); font-size: 11px; margin-left: 6px; padding: 2px 6px; border-radius: 4px; vertical-align: middle;">${prodTag}</span>`;
+    symbolEl.innerHTML = `${escapeHtml(parsed.baseSymbol)} <span class="badge" id="bs-product-badge" style="background: rgba(255,255,255,0.08); font-size: 11px; margin-left: 6px; padding: 2px 6px; border-radius: 4px; vertical-align: middle;">${escapeHtml(prodTag)}</span>`;
     
     // Company name
     document.getElementById('bs-company').textContent = `${parsed.subtitle} • ${parsed.exchange}`;
@@ -4287,9 +3822,11 @@ function updateBSPrice(ltp, prevClose, change) {
   const changeEl = document.getElementById('bs-change');
   if (!priceEl || !changeEl) return;
   
-  priceEl.textContent = `₹${ltp.toFixed(2)}`;
+  if (!(Number(ltp) > 0)) { priceEl.textContent = 'Unavailable'; changeEl.textContent = 'No verified quote'; return; }
+  priceEl.textContent = `₹${Number(ltp).toFixed(2)}`;
   
-  const actualPrevClose = prevClose || (ltp / 1.0164);
+  const actualPrevClose = Number(prevClose) || 0;
+  if (!actualPrevClose) { changeEl.textContent = 'Previous close unavailable'; return; }
   const diff = ltp - actualPrevClose;
   const pct = actualPrevClose > 0 ? (diff / actualPrevClose) * 100 : 0;
   
@@ -4325,44 +3862,17 @@ function updateBSMarketDepthPrices(ltp, realDepth) {
       const b = realDepth.buy[i] || { price: 0, quantity: 0 };
       const a = realDepth.sell[i] || { price: 0, quantity: 0 };
       bids.push({
-        price: b.price || (ltp - (i + 1) * step),
+        price: b.price || 0,
         qty: b.quantity || 0
       });
       asks.push({
-        price: a.price || (ltp + (i + 1) * step),
+        price: a.price || 0,
         qty: a.quantity || 0
       });
     }
   } else {
-    // Stable, deterministic pseudo-depth fallback
-    let hash = 0;
-    for (let charIdx = 0; charIdx < symbol.length; charIdx++) {
-      hash = symbol.charCodeAt(charIdx) + ((hash << 5) - hash);
-    }
-    
-    const getBaseQty = (index, isBuy) => {
-      const seed = Math.abs(hash + index * 17 + (isBuy ? 31 : 73));
-      return 100 + (seed % 1400); // 100 to 1500
-    };
-    
-    const ltpCents = Math.floor((ltp * 100) % 100) || 50;
-    const getFluctuatedQty = (index, isBuy) => {
-      const base = getBaseQty(index, isBuy);
-      const fluctuationSeed = (ltpCents + index * 7 + (isBuy ? 13 : 29)) % 21; // 0 to 20
-      const percent = (fluctuationSeed - 10) / 100; // -10% to +10%
-      return Math.floor(base * (1 + percent));
-    };
-    
-    for (let i = 0; i < 5; i++) {
-      bids.push({
-        price: ltp - (i + 1) * step,
-        qty: getFluctuatedQty(i, true)
-      });
-      asks.push({
-        price: ltp + (i + 1) * step,
-        qty: getFluctuatedQty(i, false)
-      });
-    }
+    container.textContent = 'Market depth unavailable';
+    return;
   }
   
   container.innerHTML = '';
@@ -4462,9 +3972,11 @@ let currentOrderProduct = 'INTRADAY';
 let currentOrderMode = 'LIMIT';
 let currentOrderExchange = 'NSE';
 
-function setOrderExchange(exchange) {
-  if (isExitOrder) return; // Prevent changing exchange on exit
+function setOrderExchange(exchange, force = false) {
+  if (!force && (isExitOrder || exchange !== currentSelectedStock?.exchange)) return; // Prevent changing exchange on exit
   currentOrderExchange = exchange;
+  const label = document.getElementById('order-exchange-label');
+  if (label) label.textContent = exchange;
   
   const nseEl = document.getElementById('order-exch-nse');
   const bseEl = document.getElementById('order-exch-bse');
@@ -4497,14 +4009,16 @@ function setOrderExchange(exchange) {
   
   if (currentSelectedStock) {
     const priceData = watchlistPrices[currentSelectedStock.symbol] || { ltp: currentSelectedStock.price };
-    const price = exchange === 'NSE' ? priceData.ltp : priceData.ltp - 0.25;
-    document.getElementById('order-price').value = price.toFixed(2);
+    const price = exchange === 'NSE' ? priceData.ltp : priceData.ltp;
+    document.getElementById('order-price').value = Number(price || 0).toFixed(2);
   }
   
   calculateOrderMargin();
 }
 
 function openOrderPlacement(side, stockInfo, price, isExit = false, positionQty = 0, accountId = '', productType = '') {
+  if (!stockInfo?.token || !stockInfo.exchange) return showNotification('Wait for verified instrument details before placing an order.', 'error');
+  stockInfo = { ...stockInfo, price: Number(stockInfo.price) || 0 };
   pushModalHistory('order-placement');
   currentOrderSide = side;
   currentSelectedStock = stockInfo;
@@ -4572,17 +4086,17 @@ function openOrderPlacement(side, stockInfo, price, isExit = false, positionQty 
   const parsedOrderSym = parseDisplaySymbol(stockInfo.symbol, stockInfo.name);
   document.getElementById('order-symbol').textContent = parsedOrderSym.baseSymbol;
   
-  const parsedPrice = parseFloat(price) || 100.00;
+  const parsedPrice = parseFloat(price) || 0;
   const priceData = watchlistPrices[stockInfo.symbol] || { ltp: parsedPrice, prevClose: parsedPrice };
   const prevClose = parseFloat(priceData.prevClose) || parsedPrice;
   const nsePrice = parseFloat(priceData.ltp) || parsedPrice;
-  const bsePrice = nsePrice - 0.25;
+  const bsePrice = stockInfo.exchange === 'BSE' ? nsePrice : 0;
   
   const diff = nsePrice - prevClose;
   const changePct = prevClose > 0 ? (diff / prevClose) * 100 : 0;
   
   document.getElementById('order-nse-price').textContent = `₹${nsePrice.toFixed(2)}`;
-  document.getElementById('order-bse-price').textContent = `₹${bsePrice.toFixed(2)}`;
+  document.getElementById('order-bse-price').textContent = '₹' + displayPrice(bsePrice);
   
   const changeEl = document.getElementById('order-nse-change');
   if (changeEl) {
@@ -4592,7 +4106,7 @@ function openOrderPlacement(side, stockInfo, price, isExit = false, positionQty 
   }
   
   // Set defaults
-  document.getElementById('order-qty').value = isExit ? positionQty.toString() : '1';
+  document.getElementById('order-qty').value = isExit ? Math.abs(positionQty).toString() : String(stockInfo.lotSize || 1);
   document.getElementById('order-price').value = nsePrice.toFixed(2);
   
   // Update max quantity label text
@@ -4625,7 +4139,7 @@ function openOrderPlacement(side, stockInfo, price, isExit = false, positionQty 
     if (btnPaylater) btnPaylater.className = 'product-btn';
     
     // Normalize mapping type for button selection
-    let normalizedProd = productType === 'INTRADAY' || productType === 'MIS' || productType === 'Normal' ? 'INTRADAY' : 'DELIVERY';
+    let normalizedProd = ['INTRADAY', 'MIS', 'VALUEPLUS'].includes(String(productType).toUpperCase()) ? 'INTRADAY' : 'DELIVERY';
     const activeBtn = normalizedProd === 'DELIVERY' ? btnDelivery : btnIntraday;
     if (activeBtn) {
       activeBtn.className = 'product-btn active';
@@ -4639,7 +4153,7 @@ function openOrderPlacement(side, stockInfo, price, isExit = false, positionQty 
   setPriceMode('LIMIT');
   
   // Set default exchange
-  setOrderExchange('NSE');
+  setOrderExchange(stockInfo.exchange, true);
   
   // Hide stock details modal directly without clearing currentSelectedStock
   const detailsModal = document.getElementById('stock-details-modal');
@@ -4651,7 +4165,7 @@ function openOrderPlacement(side, stockInfo, price, isExit = false, positionQty 
     setTimeout(() => {
       const qtyInput = document.getElementById('order-qty');
       if (qtyInput) {
-        qtyInput.value = isExit ? positionQty.toString() : '1';
+        qtyInput.value = isExit ? Math.abs(positionQty).toString() : String(stockInfo.lotSize || 1);
         window.showKeypad(qtyInput);
       }
     }, 200);
@@ -4733,8 +4247,8 @@ function setPriceMode(mode) {
       priceInput.disabled = true;
       if (currentSelectedStock) {
         const priceData = watchlistPrices[currentSelectedStock.symbol] || { ltp: currentSelectedStock.price };
-        const price = currentOrderExchange === 'NSE' ? priceData.ltp : priceData.ltp - 0.25;
-        priceInput.value = price.toFixed(2);
+        const price = currentOrderExchange === 'NSE' ? priceData.ltp : priceData.ltp;
+        priceInput.value = Number(price || 0).toFixed(2);
       }
     } else {
       priceInput.disabled = false;
@@ -4765,13 +4279,11 @@ function calculateOrderMargin() {
   
   if (!qtyInput || !priceInput || !marginValEl) return;
   
-  const qty = parseInt(qtyInput.value) || 0;
+  const qty = Number(qtyInput.value);
   const price = parseFloat(priceInput.value) || 0;
   
   let margin = qty * price;
-  if (currentOrderProduct === 'INTRADAY') {
-    margin = margin / 5; // 5x leverage
-  }
+  marginValEl.title = 'Order notional only; actual broker margin may differ';
   
   marginValEl.textContent = `₹${margin.toFixed(2)}`;
 }
@@ -4793,14 +4305,91 @@ function toggleSmartOrders() {
   }
 }
 
+let pendingOrderRequest = null;
+function getOrderRequestId(payload) {
+  const identity = JSON.stringify(payload);
+  if (pendingOrderRequest?.identity !== identity) pendingOrderRequest = { identity, id: crypto.randomUUID() };
+  return pendingOrderRequest.id;
+}
+function clearOrderRequestId() { pendingOrderRequest = null; }
+const monitoredJobs = new Set();
+async function monitorOrder(jobId) {
+  if (!jobId || monitoredJobs.has(jobId)) return;
+  monitoredJobs.add(jobId);
+  let lastStatus = '';
+  try {
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const response = await fetch(API_BASE + '/execute-trade/status/' + encodeURIComponent(jobId));
+      if (!response.ok) break;
+      const job = await response.json();
+      if (job.status !== lastStatus) {
+        lastStatus = job.status;
+        const failed = ['FAILED', 'EXPIRED', 'RECONCILE_REQUIRED'].includes(job.status);
+        showNotification(job.tradeParams.tradingsymbol + ': ' + job.status + (job.error ? ' — ' + job.error : ''), failed ? 'error' : 'info');
+      }
+      if (['COMPLETED', 'FAILED', 'EXPIRED', 'RECONCILE_REQUIRED'].includes(job.status)) { refreshPortfolio(true); break; }
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  } catch (error) { showNotification('Status check interrupted. Review the execution queue before retrying.', 'error'); }
+  finally { monitoredJobs.delete(jobId); }
+}
+async function restoreOrderMonitoring() {
+  try {
+    const response = await fetch(API_BASE + '/queue/jobs');
+    if (!response.ok) return;
+    const jobs = await response.json();
+    renderExecutionQueue(jobs);
+    for (const job of jobs.filter(entry => ['QUEUED', 'PROCESSING', 'ACCEPTED'].includes(entry.status))) monitorOrder(job.id);
+  } catch (error) { console.warn('Cannot load execution queue'); }
+}
+function renderExecutionQueue(jobs) {
+  let panel = document.getElementById('execution-queue');
+  if (!panel) {
+    panel = document.createElement('details');
+    panel.id = 'execution-queue';
+    panel.style.cssText = 'margin:12px;padding:12px;border:1px solid #444;border-radius:8px';
+    document.querySelector('.app-container')?.appendChild(panel);
+  }
+  panel.replaceChildren();
+  const heading = document.createElement('summary');
+  heading.textContent = 'Execution queue — ' + jobs.length + ' recent orders';
+  panel.appendChild(heading);
+  const refresh = document.createElement('button');
+  refresh.textContent = 'Refresh';
+  refresh.onclick = restoreOrderMonitoring;
+  panel.appendChild(refresh);
+  for (const job of jobs) {
+    const row = document.createElement('div');
+    row.style.cssText = 'padding:8px;border-bottom:1px solid #333';
+    row.textContent = job.tradeParams.tradingsymbol + ' × ' + job.tradeParams.quantity + ' • ' + job.status + (job.error ? ' • ' + job.error : '');
+    if (['FAILED', 'EXPIRED'].includes(job.status)) {
+      const retry = document.createElement('button');
+      retry.textContent = 'Review and retry';
+      retry.onclick = async () => {
+        if (!confirm('Retry this order at its original quantity and price? The server will refuse ambiguous or partially filled orders.')) return;
+        retry.disabled = true;
+        try {
+          const response = await fetch(API_BASE + '/queue/jobs/' + encodeURIComponent(job.id) + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirmed: true }) });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error);
+          monitorOrder(job.id);
+          restoreOrderMonitoring();
+        } catch (error) { showNotification(error.message, 'error'); retry.disabled = false; }
+      };
+      row.appendChild(retry);
+    }
+    panel.appendChild(row);
+  }
+}
+
 async function submitPlacedOrder() {
   const qtyInput = document.getElementById('order-qty');
   const priceInput = document.getElementById('order-price');
   
   if (!qtyInput || !priceInput) return;
   
-  const qty = parseInt(qtyInput.value) || 0;
-  if (qty <= 0) {
+  const qty = Number(qtyInput.value);
+  if (!Number.isSafeInteger(qty) || qty <= 0 || (isExitOrder && qty > Math.abs(exitPositionQty)) || qty % (currentSelectedStock.lotSize || 1) !== 0) {
     alert('Please enter a valid quantity.');
     return;
   }
@@ -4835,7 +4424,11 @@ async function submitPlacedOrder() {
     exchange: currentOrderExchange,
     tradingsymbol: currentSelectedStock.symbol,
     symboltoken: currentSelectedStock.token,
-    producttype: currentOrderProduct === 'INTRADAY' ? 'INTRADAY' : (currentOrderProduct === 'PAY LATER' ? 'MARGIN' : 'DELIVERY'),
+    producttype: currentOrderProduct === 'PAY LATER' ? 'MTF' : currentOrderProduct.toUpperCase(),
+    reduceOnly: isExitOrder,
+    expirydate: currentSelectedStock.expiry,
+    strikeprice: currentSelectedStock.strike,
+    optiontype: currentSelectedStock.optionType,
     transactiontype: currentOrderSide,
     quantity: qty,
     ordertype: currentOrderMode,
@@ -4861,7 +4454,9 @@ async function submitPlacedOrder() {
       if (data.success === false) {
         showNotification(data.error || 'Unknown queue error', 'error');
       } else {
-        showNotification('Order submitted to background execution queue!', 'success');
+        showNotification('Order queued; awaiting broker confirmation.', 'info');
+        clearOrderRequestId();
+        monitorOrder(data.jobId);
       }
       
       // Refresh details immediately
@@ -4878,7 +4473,7 @@ async function submitPlacedOrder() {
       submitBtn.textContent = originalText;
     }
   } catch (e) {
-    showNotification('Failed to place order: Connection error.', 'error');
+    showNotification('Connection interrupted. Order status may be unknown; retrying the unchanged order uses the same request ID.', 'error');
     submitBtn.disabled = false;
     submitBtn.textContent = originalText;
   }
@@ -5031,8 +4626,8 @@ function renderMobileOrders() {
     const priceData = watchlistPrices[symbolKey];
     let ltpText = '';
     if (priceData && priceData.ltp) {
-      const diff = priceData.ltp * 0.0164;
-      const pct = 1.64;
+      const diff = priceData.prevClose ? priceData.ltp - priceData.prevClose : 0;
+      const pct = priceData.prevClose ? diff / priceData.prevClose * 100 : 0;
       const sign = priceData.change === 'down' ? '-' : '+';
       const colorClass = priceData.change === 'down' ? 'text-red' : 'text-green';
       ltpText = `<span class="${colorClass}">LTP ₹${parseFloat(priceData.ltp).toFixed(2)} (${sign}${pct.toFixed(2)}%)</span>`;
@@ -5050,10 +4645,10 @@ function renderMobileOrders() {
         <div class="mobile-order-card-footer">
           <span class="mobile-order-card-time">${timeStr}</span>
           <div class="mobile-order-card-actions">
-            <button class="mobile-order-card-btn edit" style="background: var(--blue); margin-right: 6px;" data-id="${o.orderid}">
+            <button class="mobile-order-card-btn edit" style="background: var(--blue); margin-right: 6px;" data-id="${escapeHtml(o.orderid)}">
               <i class="fa-solid fa-pen-to-square"></i> EDIT
             </button>
-            <button class="mobile-order-card-btn cancel" data-id="${o.orderid}">
+            <button class="mobile-order-card-btn cancel" data-id="${escapeHtml(o.orderid)}">
               <i class="fa-solid fa-xmark"></i> CANCEL
             </button>
           </div>
@@ -5063,7 +4658,7 @@ function renderMobileOrders() {
       actionsHtml = `
         <div class="mobile-order-card-footer">
           <span class="mobile-order-card-time">${timeStr}</span>
-          <span class="mobile-order-card-time" style="color: var(--text-muted);">ID: ${o.orderid}</span>
+          <span class="mobile-order-card-time" style="color: var(--text-muted);">ID: ${escapeHtml(o.orderid)}</span>
         </div>
       `;
     }
@@ -5080,7 +4675,7 @@ function renderMobileOrders() {
         </div>
         <div class="mobile-order-card-badges">
           <span class="mobile-order-card-badge ${sideClass}">${side}</span>
-          <span class="mobile-order-card-badge normal">${prodTag}</span>
+          <span class="mobile-order-card-badge normal">${escapeHtml(prodTag)}</span>
           <span class="mobile-order-card-badge normal">${orderTypeTag}</span>
           <span class="mobile-order-card-badge ${statusBadgeClass}">${displayStatus}</span>
         </div>
@@ -5100,7 +4695,7 @@ function renderMobileOrders() {
       const cancelBtn = card.querySelector('.mobile-order-card-btn.cancel');
       if (cancelBtn) {
         cancelBtn.addEventListener('click', async () => {
-          if (confirm(`Cancel pending order ${o.orderid}?`)) {
+          if (confirm(`Cancel pending order ${escapeHtml(o.orderid)}?`)) {
             try {
               const res = await fetch(`${API_BASE}/orders/cancel`, {
                 method: 'POST',
@@ -5138,33 +4733,29 @@ function renderMobileOrders() {
 let clickedOCSymbol = 'NIFTY';
 let activeOCSymbol = 'NIFTY';
 let activeOCSegment = 'LTP';
-let activeOCExpiry = '25JUN26';
+let activeOCExpiry = '';
+let ocFetching = false;
 let ocPoller = null;
 
-window.openOptionChain = function(symbol) {
-  const cleanSymbol = symbol.replace('-EQ', '');
-  clickedOCSymbol = cleanSymbol;
-  activeOCSymbol = cleanSymbol;
-
-  // Close stock details sheet
+async function loadOptionExpiries() {
+  const response = await fetch(API_BASE + '/option-chain/expiries?symbol=' + encodeURIComponent(activeOCSymbol));
+  if (!response.ok) throw new Error('Cannot load expiries');
+  const expiries = await response.json();
+  const select = document.getElementById('oc-expiry-select');
+  select.replaceChildren();
+  for (const expiry of expiries) select.add(new Option(expiry.date, expiry.code));
+  activeOCExpiry = select.value;
+}
+window.openOptionChain = async function(symbol) {
+  clickedOCSymbol = activeOCSymbol = symbol.replace('-EQ', '');
   closeStockDetails();
-  
-  // Set default expiry select value if element exists
-  const expSelect = document.getElementById('oc-expiry-select');
-  if (expSelect) {
-    activeOCExpiry = expSelect.value;
-  }
-  
-  // Populate strikes & prices
-  refreshOptionChainTable();
-  
-  // Display Option Chain Modal
-  const modal = document.getElementById('options-chain-modal');
-  if (modal) modal.classList.remove('hidden');
-  
-  // Start Option Chain poller (refreshes prices every 2 seconds)
-  if (ocPoller) clearInterval(ocPoller);
-  ocPoller = setInterval(refreshOptionChainTable, 2000);
+  document.getElementById('options-chain-modal')?.classList.remove('hidden');
+  clearInterval(ocPoller);
+  try {
+    await loadOptionExpiries();
+    await refreshOptionChainTable();
+    ocPoller = setInterval(refreshOptionChainTable, 5000);
+  } catch (error) { showNotification(error.message, 'error'); }
 };
 
 window.closeOptionChain = function() {
@@ -5182,9 +4773,9 @@ window.closeOptionChain = function() {
   }
 };
 
-window.setOCAsset = function(assetName) {
+window.setOCAsset = async function(assetName) {
   activeOCSymbol = assetName;
-  refreshOptionChainTable();
+  try { await loadOptionExpiries(); await refreshOptionChainTable(); } catch (error) { showNotification(error.message, 'error'); }
 };
 
 window.setOCSegment = function(segmentName) {
@@ -5207,209 +4798,52 @@ window.setOCSegment = function(segmentName) {
 
 function renderOCHeaderToggles(activeSpotPrice) {
   const container = document.getElementById('oc-asset-selectors-container');
-  if (!container) return;
-  
-  let firstAsset = clickedOCSymbol;
-  let secondAsset = 'NIFTY';
-  
-  if (clickedOCSymbol === 'NIFTY') {
-    firstAsset = 'NIFTY';
-    secondAsset = 'BANKNIFTY';
-  } else if (clickedOCSymbol === 'BANKNIFTY' || clickedOCSymbol === 'SENSEX') {
-    firstAsset = clickedOCSymbol;
-    secondAsset = 'NIFTY';
-  }
-  
-  const niftySpot = parseFloat(document.getElementById('index-nifty-ltp')?.textContent.replace(/,/g, '')) || 23622.90;
-  const sbilifeSpot = (watchlistPrices['SBILIFE-EQ'] && watchlistPrices['SBILIFE-EQ'].ltp) || 1706.00;
-  
-  const getSpotVal = (asset) => {
-    if (asset === 'NIFTY') return niftySpot;
-    if (asset === 'SBILIFE') return sbilifeSpot;
-    if (asset === activeOCSymbol) return activeSpotPrice;
-    
-    const baseSym = asset + '-EQ';
-    return (watchlistPrices[baseSym] && watchlistPrices[baseSym].ltp) || (watchlistPrices[asset] && watchlistPrices[asset].ltp) || 100.00;
-  };
-  
-  const getChangeHTML = (asset, spot) => {
-    let baseline = 100.00;
-    const assetKey = asset.endsWith('-EQ') ? asset : `${asset}-EQ`;
-    if (watchlistPrices[assetKey] && watchlistPrices[assetKey].prevClose) {
-      baseline = watchlistPrices[assetKey].prevClose;
-    } else {
-      if (asset === 'NIFTY') baseline = 23622.90;
-      else if (asset === 'BANKNIFTY') baseline = 51200.00;
-      else if (asset === 'SENSEX') baseline = 75527.95;
-      else if (asset === 'SBILIFE') baseline = 1706.00;
-      else baseline = 100.00;
-    }
-    
-    const diff = spot - baseline;
-    const pct = (diff / baseline) * 100;
-    const textClass = diff >= 0 ? 'text-green' : 'text-red';
-    return `<span class="${textClass}" style="font-size: 9px; font-weight: 500;">${diff >= 0 ? '+' : ''}${diff.toFixed(2)} (${diff >= 0 ? '+' : ''}${pct.toFixed(2)}%)</span>`;
-  };
-  
-  const firstSpot = getSpotVal(firstAsset);
-  const secondSpot = getSpotVal(secondAsset);
-  
-  const firstActive = activeOCSymbol === firstAsset ? 'active' : '';
-  const secondActive = activeOCSymbol === secondAsset ? 'active' : '';
-  
-  container.innerHTML = `
-    <button class="oc-asset-btn ${firstActive}" onclick="setOCAsset('${firstAsset}')" style="flex: 1;">
-      <div class="oc-asset-name">${firstAsset}</div>
-      <div class="oc-asset-price-row">
-        <span>${firstSpot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-        ${getChangeHTML(firstAsset, firstSpot)}
-      </div>
-    </button>
-    <button class="oc-asset-btn ${secondActive}" onclick="setOCAsset('${secondAsset}')" style="flex: 1;">
-      <div class="oc-asset-name">${secondAsset} ${secondAsset === 'NIFTY' ? '<span class="oc-expiry-badge">Expiry Tue</span>' : ''}</div>
-      <div class="oc-asset-price-row">
-        <span>${secondSpot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-        ${getChangeHTML(secondAsset, secondSpot)}
-      </div>
-    </button>
-  `;
+  if (container) container.textContent = activeOCSymbol + ' • Spot ₹' + displayPrice(activeSpotPrice);
 }
-
 window.refreshOptionChainTable = async function() {
-  if (!activeOCSymbol) return;
-  
+  if (ocFetching) return;
+  const body = document.getElementById('oc-table-body');
+  activeOCExpiry = document.getElementById('oc-expiry-select').value;
+  if (!activeOCExpiry) { body.innerHTML = '<tr><td colspan="5">No active contracts available. Connect a quote provider and refresh instruments.</td></tr>'; return; }
+  ocFetching = true;
+  const symbol = activeOCSymbol, expiry = activeOCExpiry;
   try {
-    const expSelect = document.getElementById('oc-expiry-select');
-    if (expSelect) {
-      activeOCExpiry = expSelect.value;
-    }
-    
-    const url = `${API_BASE}/option-chain?symbol=${activeOCSymbol}&expiry=${activeOCExpiry}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error('Failed to fetch option chain.');
+    const response = await fetch(API_BASE + '/option-chain?symbol=' + encodeURIComponent(symbol) + '&expiry=' + encodeURIComponent(expiry));
     const data = await response.json();
-    
-    const spotPrice = data.spotPrice;
-    
-    // Update Spot Spot display inside title block
+    if (!response.ok) throw new Error(data.error || 'Option chain unavailable');
+    if (symbol !== activeOCSymbol || expiry !== activeOCExpiry) return;
     const spotDisplay = document.getElementById('oc-underlying-ltp');
-    if (spotDisplay) spotDisplay.textContent = `₹${spotPrice.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    
-    // Render selectors
-    renderOCHeaderToggles(spotPrice);
-    
-    const tbody = document.getElementById('oc-table-body');
-    if (!tbody) return;
-    tbody.innerHTML = '';
-    
-    let separatorInserted = false;
-    
-    data.chain.forEach(row => {
-      if (!separatorInserted && row.strike > spotPrice) {
-        insertSpotSeparatorRow(tbody, spotPrice, activeOCSymbol);
-        separatorInserted = true;
-      }
-      
-      const tr = document.createElement('tr');
-      
-      // Determine columns based on segment selection
-      let callLtpText = `₹${row.calls.ltp.toFixed(2)}`;
-      let putLtpText = `₹${row.puts.ltp.toFixed(2)}`;
-      let callSubText = `<div class="oc-change-pct text-green">+${row.calls.changePct.toFixed(2)}%</div>`;
-      let putSubText = `<div class="oc-change-pct text-red">${row.puts.changePct.toFixed(2)}%</div>`;
-      
-      if (activeOCSegment === 'OI') {
-        callLtpText = row.calls.oi;
-        putLtpText = row.puts.oi;
-        callSubText = `<div class="oc-change-pct text-muted">OI (Qty)</div>`;
-        putSubText = `<div class="oc-change-pct text-muted">OI (Qty)</div>`;
-      } else if (activeOCSegment === 'Greeks') {
-        callLtpText = `Δ ${row.calls.greeks.delta.toFixed(2)}`;
-        putLtpText = `Δ ${row.puts.greeks.delta.toFixed(2)}`;
-        callSubText = `<div class="oc-change-pct text-muted" style="font-size:8px;">θ ${row.calls.greeks.theta.toFixed(2)} | γ ${row.calls.greeks.gamma.toFixed(4)}</div>`;
-        putSubText = `<div class="oc-change-pct text-muted" style="font-size:8px;">θ ${row.puts.greeks.theta.toFixed(2)} | γ ${row.puts.greeks.gamma.toFixed(4)}</div>`;
-      }
-      
-      const callItmClass = row.calls.itm ? 'call-itm' : '';
-      const putItmClass = row.puts.itm ? 'put-itm' : '';
-      
-      tr.innerHTML = `
-        <td class="call-cell ${callItmClass} oc-volume-val" onclick="placeDerivativeOrder('${row.calls.symbol}', 'BUY', ${row.calls.ltp})">${row.calls.volume}</td>
-        
-        <td class="call-cell ${callItmClass}" onclick="placeDerivativeOrder('${row.calls.symbol}', 'BUY', ${row.calls.ltp})">
-          <div class="oc-ltp-val call-side" style="font-weight: 700;">${callLtpText}</div>
-          ${callSubText}
-        </td>
-        
-        <td class="oc-strike-col" style="font-weight: 700; color: var(--text-primary);">${row.strike}</td>
-        
-        <td class="put-cell ${putItmClass}" onclick="placeDerivativeOrder('${row.puts.symbol}', 'BUY', ${row.puts.ltp})">
-          <div class="oc-ltp-val put-side" style="font-weight: 700; color: #f2495c;">${putLtpText}</div>
-          ${putSubText}
-        </td>
-  
-        <td class="put-cell ${putItmClass} oc-volume-val" onclick="placeDerivativeOrder('${row.puts.symbol}', 'BUY', ${row.puts.ltp})">${row.puts.volume}</td>
-      `;
-      
-      tbody.appendChild(tr);
-    });
-    
-    if (!separatorInserted) {
-      insertSpotSeparatorRow(tbody, spotPrice, activeOCSymbol);
+    if (spotDisplay) spotDisplay.textContent = '₹' + displayPrice(data.spotPrice);
+    renderOCHeaderToggles(data.spotPrice);
+    body.replaceChildren();
+    for (const row of data.chain) {
+      const element = document.createElement('tr');
+      const makeCell = (contract, volume) => {
+        const cell = document.createElement('td');
+        cell.className = 'oc-ltp-val';
+        if (volume) cell.textContent = '—';
+        else if (activeOCSegment !== 'LTP') cell.textContent = 'Not available';
+        else cell.textContent = contract ? '₹' + displayPrice(contract.ltp) + (contract.quoteStatus === 'stale' ? ' (stale)' : '') : '—';
+        if (contract) cell.addEventListener('click', () => placeDerivativeOrder(contract.symbol, 'BUY'));
+        return cell;
+      };
+      const strike = document.createElement('td');
+      strike.className = 'oc-strike-col';
+      strike.textContent = row.strike;
+      element.append(makeCell(row.calls, true), makeCell(row.calls, false), strike, makeCell(row.puts, false), makeCell(row.puts, true));
+      body.appendChild(element);
     }
-  } catch (err) {
-    console.error('Error refreshing option chain table:', err);
-  }
+  } catch (error) { body.innerHTML = '<tr><td colspan="5">' + escapeHtml(error.message) + '</td></tr>'; }
+  finally { ocFetching = false; }
 };
-
-function insertSpotSeparatorRow(tbody, spotPrice, asset) {
-  const spotRow = document.createElement('tr');
-  spotRow.className = 'oc-spot-separator-row';
-  
-  const assetKey = asset.endsWith('-EQ') ? asset : `${asset}-EQ`;
-  let baseline = 100.00;
-  if (watchlistPrices[assetKey] && watchlistPrices[assetKey].prevClose) {
-    baseline = watchlistPrices[assetKey].prevClose;
-  } else {
-    const isNifty = asset === 'NIFTY';
-    baseline = isNifty ? 23622.90 : (asset === 'BANKNIFTY' ? 51200.00 : (asset === 'SENSEX' ? 75527.95 : (asset === 'SBILIFE' ? 1706.00 : 100.00)));
-  }
-  const diff = spotPrice - baseline;
-  const pct = (diff / baseline) * 100;
-  
-  const displayVal = `${diff >= 0 ? '+' : ''}${diff.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${diff >= 0 ? '+' : ''}${pct.toFixed(2)}%)`;
-  const displayClass = diff >= 0 ? "text-green" : "text-red";
-  const displayArrow = diff >= 0 ? "▲" : "▼";
-
-  spotRow.innerHTML = `
-    <td colspan="5" style="padding: 10px; text-align: center; font-weight: 600; font-size: 12.5px;">
-      Long Buildup &nbsp;|&nbsp; 
-      <span style="color: var(--text-primary); font-family:var(--font-mono); font-weight:700;">${spotPrice.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span> 
-      &nbsp;&nbsp;<span class="${displayClass}">${displayArrow} ${displayVal}</span>
-    </td>
-  `;
-  tbody.appendChild(spotRow);
-}
-
-window.placeDerivativeOrder = function(optionSymbol, side, ltp) {
-  // Clear option chain poller and close modal
-  if (ocPoller) {
-    clearInterval(ocPoller);
-    ocPoller = null;
-  }
-  const ocModal = document.getElementById('options-chain-modal');
-  if (ocModal) ocModal.classList.add('hidden');
-  
-  // Construct mock stockInfo for the option contract
-  const stockInfo = {
-    symbol: optionSymbol,
-    name: optionSymbol.replace(/-/g, ' '),
-    token: 'opt_' + Math.random().toString(36).substring(2, 9),
-    price: ltp
-  };
-  
-  // Open the standard order placement modal for this option contract!
-  openOrderPlacement(side, stockInfo, ltp);
+window.placeDerivativeOrder = async function(optionSymbol, side) {
+  try {
+    const response = await fetch(API_BASE + '/stocks/info?symbol=' + encodeURIComponent(optionSymbol));
+    const stock = await response.json();
+    if (!response.ok) throw new Error(stock.error || 'Instrument unavailable');
+    closeOptionChain();
+    openOrderPlacement(side, stock, stock.price);
+  } catch (error) { showNotification(error.message, 'error'); }
 };
 
 // ==========================================================================
@@ -5526,16 +4960,22 @@ window.openTradingViewChart = async function(symbol, customName = null, customPr
   } else {
     const baseSym = symbol.includes('-') ? symbol : `${symbol}-EQ`;
     const priceData = watchlistPrices[baseSym] || watchlistPrices[symbol];
-    const priceVal = priceData ? priceData.ltp : (customPrice || 100.00);
+    const priceVal = priceData ? priceData.ltp : (customPrice || 0);
     
     chartActiveStockInfo = {
       symbol: symbol,
       name: customName || symbol.replace(/-/g, ' '),
       price: priceVal,
-      token: customToken || 'opt_' + Math.random().toString(36).substring(2, 9)
+      token: customToken || '',
+      exchange: currentSelectedStock?.symbol === symbol ? currentSelectedStock.exchange : undefined
     };
   }
 
+  try {
+    const response = await fetch(API_BASE + '/stocks/info?symbol=' + encodeURIComponent(symbol));
+    if (response.ok) chartActiveStockInfo = await response.json();
+  } catch (error) { console.warn('Chart instrument metadata unavailable'); }
+  chartActiveStockInfo.price = Number(chartActiveStockInfo.price) || 0;
   // Update compact header badges dynamically
   const headerSymbol = document.getElementById('chart-header-symbol');
   const headerPrice = document.getElementById('chart-header-price');
@@ -5547,7 +4987,7 @@ window.openTradingViewChart = async function(symbol, customName = null, customPr
   }
   const headerNifty = document.getElementById('chart-header-nifty');
   if (headerNifty && watchlistPrices['NIFTY-EQ']) {
-    headerNifty.textContent = watchlistPrices['NIFTY-EQ'].ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    headerNifty.textContent = Number(watchlistPrices['NIFTY-EQ'].ltp || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
   closeStockDetails();
@@ -6037,8 +5477,8 @@ function renderMobileOrdersList(orders, containerId, isPending = false) {
     const priceData = watchlistPrices[symbolKey];
     let ltpText = '';
     if (priceData && priceData.ltp) {
-      const diff = priceData.ltp * 0.0164;
-      const pct = 1.64;
+      const diff = priceData.prevClose ? priceData.ltp - priceData.prevClose : 0;
+      const pct = priceData.prevClose ? diff / priceData.prevClose * 100 : 0;
       const sign = priceData.change === 'down' ? '-' : '+';
       const colorClass = priceData.change === 'down' ? 'text-red' : 'text-green';
       ltpText = `<span class="${colorClass}">LTP ₹${parseFloat(priceData.ltp).toFixed(2)} (${sign}${pct.toFixed(2)}%)</span>`;
@@ -6055,10 +5495,10 @@ function renderMobileOrdersList(orders, containerId, isPending = false) {
         <div class="mobile-order-card-footer">
           <span class="mobile-order-card-time">${timeStr}</span>
           <div class="mobile-order-card-actions">
-            <button class="mobile-order-card-btn edit" style="background: var(--blue); margin-right: 6px;" data-id="${o.orderid}">
+            <button class="mobile-order-card-btn edit" style="background: var(--blue); margin-right: 6px;" data-id="${escapeHtml(o.orderid)}">
               <i class="fa-solid fa-pen-to-square"></i> EDIT
             </button>
-            <button class="mobile-order-card-btn cancel" data-id="${o.orderid}">
+            <button class="mobile-order-card-btn cancel" data-id="${escapeHtml(o.orderid)}">
               <i class="fa-solid fa-xmark"></i> CANCEL
             </button>
           </div>
@@ -6068,7 +5508,7 @@ function renderMobileOrdersList(orders, containerId, isPending = false) {
       actionsHtml = `
         <div class="mobile-order-card-footer">
           <span class="mobile-order-card-time">${timeStr}</span>
-          <span class="mobile-order-card-time" style="color: var(--text-muted);">ID: ${o.orderid}</span>
+          <span class="mobile-order-card-time" style="color: var(--text-muted);">ID: ${escapeHtml(o.orderid)}</span>
         </div>
       `;
     }
@@ -6085,7 +5525,7 @@ function renderMobileOrdersList(orders, containerId, isPending = false) {
         </div>
         <div class="mobile-order-card-badges">
           <span class="mobile-order-card-badge ${sideClass}">${side}</span>
-          <span class="mobile-order-card-badge normal">${prodTag}</span>
+          <span class="mobile-order-card-badge normal">${escapeHtml(prodTag)}</span>
           <span class="mobile-order-card-badge normal">${orderTypeTag}</span>
           <span class="mobile-order-card-badge ${statusBadgeClass}">${displayStatus}</span>
         </div>
@@ -6106,7 +5546,7 @@ function renderMobileOrdersList(orders, containerId, isPending = false) {
       }
       if (cancelBtn) {
         cancelBtn.addEventListener('click', async () => {
-          if (confirm(`Cancel pending order ${o.orderid}?`)) {
+          if (confirm(`Cancel pending order ${escapeHtml(o.orderid)}?`)) {
             try {
               const res = await fetch(`${API_BASE}/orders/cancel`, {
                 method: 'POST',
@@ -6277,7 +5717,7 @@ function renderMobilePositions(positions, containerId, accountId = '') {
           </div>
           <div class="mobile-pos-card-middle">
             <div class="mobile-pos-card-qty-avg" style="font-weight: 500;">
-              <span>${closedQtyLabel} &bull; ${prodTag}</span>
+              <span>${closedQtyLabel} &bull; ${escapeHtml(prodTag)}</span>
             </div>
             <div class="mobile-pos-card-ltp">
               LTP ₹${ltp.toFixed(2)} <span class="${changeClass}" style="font-weight: 500; font-size:11px;">${changePctText}</span>
@@ -6312,7 +5752,7 @@ function renderMobilePositions(positions, containerId, accountId = '') {
           <div class="mobile-pos-card-footer">
             <div class="mobile-pos-card-badges">
               <span class="mobile-pos-badge ${txBadgeClass}">${txBadgeText}</span>
-              <span class="mobile-pos-badge normal">${prodTag}</span>
+              <span class="mobile-pos-badge normal">${escapeHtml(prodTag)}</span>
               ${lotSize > 1 ? `<span class="mobile-pos-badge normal">(1 Lot = ${lotSize})</span>` : ''}
             </div>
           </div>
@@ -6671,4 +6111,3 @@ function initBottomSheetSwipeDismiss() {
     });
   });
 }
-

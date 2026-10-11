@@ -21,7 +21,7 @@ const MONTHS = {
 let isInitialized = false;
 let lastInitialized = 0;
 let initializing = null;
-let isDataApiDisabled = false;
+const disabledUntil = new Map();
 
 // Normalize dates from Dhan CSV to YYYY-MM-DD
 function normalizeDate(dateStr) {
@@ -42,18 +42,25 @@ function parseAoExpiry(aoDateStr) {
 
 // Download and parse Dhan CSV master list
 async function initializeDhanService() {
-  isDataApiDisabled = false;
+  if (initializing) return initializing;
+  initializing = refreshDhanService();
+  try { return await initializing; } finally { initializing = null; }
+}
+async function refreshDhanService() {
+  disabledUntil.clear();
   if (isInitialized && Date.now() - lastInitialized < 6 * 3600000) return true;
 
   try {
     // 1. Download CSV if it doesn't exist
     if (!fs.existsSync(CSV_PATH) || Date.now() - fs.statSync(CSV_PATH).mtimeMs > 6 * 3600000) {
       console.log('[DhanService] Dhan scrip master CSV not found. Downloading from images.dhan.co...');
-      const response = await axios.get(CSV_URL, { timeout: 45000 });
+      try {
+      const response = await axios.get(CSV_URL, { timeout: 20000 });
       if (typeof response.data !== 'string' || !response.data.includes('SEM_EXM_EXCH_ID')) throw new Error('Invalid Dhan instrument master');
       fs.writeFileSync(CSV_PATH + '.tmp', response.data, { encoding: 'utf8', mode: 0o600 });
       fs.renameSync(CSV_PATH + '.tmp', CSV_PATH);
       console.log('[DhanService] Downloaded and cached Dhan scrip master CSV.');
+      } catch (error) { if (!fs.existsSync(CSV_PATH)) throw error; console.warn('[DhanService] Refresh failed; retaining cached instruments'); }
     } else {
       console.log('[DhanService] Loading Dhan scrip master CSV from cache...');
     }
@@ -86,7 +93,7 @@ async function initializeDhanService() {
       } else if (segment === 'I') {
         // Index
         indexMap[`${exchange}_${tradingSymbol}`] = secId;
-      } else if (segment === 'D' || segment === 'M') {
+      } else if (segment === 'D' || segment === 'M' || segment === 'C') {
         // Derivatives (F&O) & Commodity
         // Extract underlying symbol (handle hyphenated underlyings like BAJAJ-AUTO)
         const parts = tradingSymbol.split('-');
@@ -111,8 +118,8 @@ async function initializeDhanService() {
         exchangeSegment = `${exchange}_EQ`;
       } else if (segment === 'I') {
         exchangeSegment = 'IDX_I';
-      } else if (segment === 'D' || segment === 'M') {
-        exchangeSegment = exchange === 'MCX' ? 'MCX_COMM' : `${exchange}_FNO`;
+      } else if (segment === 'D' || segment === 'M' || segment === 'C') {
+        exchangeSegment = exchange === 'MCX' ? 'MCX_COMM' : segment === 'C' ? exchange + '_CURRENCY' : `${exchange}_FNO`;
       }
 
       const lotSizeVal = (segment === 'E' || segment === 'I') ? 1 : (parts[6] ? parseFloat(parts[6].trim()) : 1);
@@ -330,7 +337,7 @@ function resolveToDhan(symbol, exchangeSegment, token) {
 
 // Fetch live OHLC quotes from Dhan API for a list of symbols
 async function fetchPrices(symbols, credentials) {
-  if (isDataApiDisabled) {
+  if ((disabledUntil.get(credentials?.clientId) || 0) > Date.now()) {
     return {};
   }
   if (!isInitialized) {
@@ -422,14 +429,14 @@ async function fetchPrices(symbols, credentials) {
       errorLower.includes('authentication failed')
     ) {
       console.warn('[DhanService] Dhan Data API subscription check failed or token invalid. Disabling Dhan live price fetching to avoid rate-limit blocking.');
-      isDataApiDisabled = true;
+      disabledUntil.set(credentials.clientId, Date.now() + 60000);
     }
     return {};
   }
 }
 
 function resetDataApiStatus() {
-  isDataApiDisabled = false;
+  disabledUntil.clear();
   console.log('[DhanService] Reset Dhan Data API status to enabled.');
 }
 

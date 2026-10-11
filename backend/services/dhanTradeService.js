@@ -81,7 +81,7 @@ class DhanTradeService {
   }
 
   log(message, type = 'info', details = null) {
-    this.logCallback({
+    this.logCallback(require('./redactionService').redact({
       timestamp: new Date().toISOString(),
       accountId: this.account.id,
       accountName: this.account.name,
@@ -89,7 +89,7 @@ class DhanTradeService {
       type,
       message,
       details
-    });
+    }));
   }
 
   saveTokenToConfig(accessToken, tokenGenerationTime, name = null) {
@@ -222,7 +222,7 @@ class DhanTradeService {
       }
     } catch (error) {
       this.session.connected = false;
-      const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
+      const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
       this.log(`Login failed: ${errorMsg}`, 'error');
       return false;
     }
@@ -306,13 +306,13 @@ class DhanTradeService {
         this.clearCache();
         return { status: true, message: 'SUCCESS', data: { orderid: response.data.orderId } };
       } else {
-        throw new Error(response.data.errorMessage || response.data.remarks || 'Order placement failed');
+        throw Object.assign(new Error(response.data.errorMessage || response.data.remarks || 'Order placement failed'), { brokerRejected: true });
       }
     } catch (error) {
       this.handleApiError(error, 'placeOrder');
-      const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
+      const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
       this.log(`Order placement failed: ${errorMsg}`, 'error');
-      return { status: false, message: errorMsg };
+      return { status: false, message: errorMsg, uncertain: !error.brokerRejected && (!error.response || Number(error.response.status) >= 500) };
     }
   }
 
@@ -339,9 +339,9 @@ class DhanTradeService {
       }
     } catch (error) {
       this.handleApiError(error, 'cancelOrder');
-      const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
+      const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
       this.log(`Order cancellation failed: ${errorMsg}`, 'error');
-      return { status: false, message: errorMsg };
+      return { status: false, message: errorMsg, uncertain: !error.brokerRejected && (!error.response || Number(error.response.status) >= 500) };
     }
   }
 
@@ -380,13 +380,13 @@ class DhanTradeService {
       }
     } catch (error) {
       this.handleApiError(error, 'modifyOrder');
-      const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
+      const errorMsg = require('./redactionService').redact(error.response ? JSON.stringify(error.response.data) : error.message);
       this.log(`Order modification failed: ${errorMsg}`, 'error');
-      return { status: false, message: errorMsg };
+      return { status: false, message: errorMsg, uncertain: !error.brokerRejected && (!error.response || Number(error.response.status) >= 500) };
     }
   }
 
-  async getHolding() {
+  async getHolding(forceRefresh = false) {
     if (this.account.isSimulated) {
       return simManager.getHolding(this.account);
     }
@@ -397,7 +397,8 @@ class DhanTradeService {
 
     const now = Date.now();
     const cacheDuration = 12 * 60 * 60 * 1000; // 12 hours cache
-    if (this.cache.holding.timestamp && (now - this.cache.holding.timestamp < cacheDuration)) {
+    if (!forceRefresh && this.cache.holding.timestamp && (now - this.cache.holding.timestamp < cacheDuration)) {
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.holding.data || [];
     }
 
@@ -418,16 +419,19 @@ class DhanTradeService {
         return data;
       }
       this.cache.holding.timestamp = now - cacheDuration + (5 * 60 * 1000); // Retry in 5 minutes
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.holding.data || [];
     } catch (error) {
+      if (forceRefresh) throw error;
       this.handleApiError(error, 'getHolding');
       console.error(`[Dhan] [${this.account.name}] Fetch holdings failed: ${error.message}`);
       this.cache.holding.timestamp = now - cacheDuration + (5 * 60 * 1000); // Retry in 5 minutes
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.holding.data || [];
     }
   }
 
-  async getPosition() {
+  async getPosition(forceRefresh = false) {
     if (this.account.isSimulated) {
       return simManager.getPosition(this.account);
     }
@@ -437,7 +441,7 @@ class DhanTradeService {
     }
 
     const now = Date.now();
-    if (this.cache.position.timestamp && (now - this.cache.position.timestamp < 5000)) {
+    if (!forceRefresh && this.cache.position.timestamp && (now - this.cache.position.timestamp < 5000)) {
       return this.cache.position.data;
     }
 
@@ -567,12 +571,17 @@ class DhanTradeService {
         this.cache.position = { data, timestamp: now };
         return data;
       }
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       this.cache.position.timestamp = now;
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.position.data || [];
     } catch (error) {
+      if (forceRefresh) throw error;
       this.handleApiError(error, 'getPosition');
       console.error(`[Dhan] [${this.account.name}] Fetch positions failed: ${error.message}`);
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       this.cache.position.timestamp = now;
+      if (forceRefresh) throw new Error('Fresh broker portfolio unavailable');
       return this.cache.position.data || [];
     }
   }
@@ -642,7 +651,7 @@ class DhanTradeService {
           else if (seg === 'BSE_EQ') exchange = 'BSE';
           else if (seg === 'BSE_FNO') exchange = 'BFO';
           else if (seg === 'MCX_COMM') exchange = 'MCX';
-          else if (seg === 'CURRENCY_FUT' || seg === 'CDS_FUT') exchange = 'CDS';
+          else if (seg === 'CURRENCY_FUT' || seg === 'CDS_FUT' || seg === 'NSE_CURRENCY') exchange = 'CDS';
           else exchange = seg.split('_')[0];
 
           const qty = parseInt(o.quantity || 0);
@@ -658,7 +667,7 @@ class DhanTradeService {
             producttype: o.productType,
             quantity: qty.toString(),
             price: (o.price || 0).toString(),
-            status: o.orderStatus.toLowerCase(),
+            status: String(o.orderStatus || '').toLowerCase(),
             orderstatus: o.orderStatus.toLowerCase(),
             updatetime: o.updateTime || o.createTime || new Date().toLocaleString(),
             averageprice: (o.averageTradedPrice ?? 0).toString(),
@@ -673,9 +682,11 @@ class DhanTradeService {
         this.cache.orderBook = { data, timestamp: now };
         return data;
       }
+      if (forceRefresh) throw new Error('Fresh broker order book unavailable');
       this.cache.orderBook.timestamp = now;
       return this.cache.orderBook.data || [];
     } catch (error) {
+      if (forceRefresh) throw error;
       this.handleApiError(error, 'getOrderBook');
       this.log(`Fetch order book failed: ${error.message}`, 'error');
       this.cache.orderBook.timestamp = now;

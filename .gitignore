@@ -11,3 +11,6 @@ backend/*.db*
 *.log
 backend/api-scrip-master.csv
 backend/services/angelOneInstruments.json
+
+backend/instruments.json
+backend/services/angel_instruments.json

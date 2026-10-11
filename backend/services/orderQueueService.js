@@ -40,7 +40,8 @@ class OrderQueueService {
       ? [metadata.trackingKey, targetId, metadata.expectedChildQty].join(':')
       : [userId, targetId, params.requestId || crypto.randomUUID()].join(':');
     const jobId = 'job_' + crypto.createHash('sha256').update(identity).digest('hex').slice(0, 24);
-    const brokerRef = crypto.createHash('sha256').update(jobId).digest('hex').slice(0, 24);
+    const referenceSize = this.engine.services[targetId]?.account.broker === 'motilal' ? 10 : 19;
+    const brokerRef = crypto.createHash('sha256').update(jobId).digest('base64url').replace(/[^A-Za-z0-9]/g, '').slice(0, referenceSize);
     tradeParams.clientOrderId = brokerRef;
     tradeParams.correlationId = brokerRef;
     await this.database.run(
@@ -48,7 +49,8 @@ class OrderQueueService {
       [jobId, userId, targetId, JSON.stringify(tradeParams), new Date().toISOString(), JSON.stringify(metadata || {})]
     );
     const existing = await this.getJobStatus(jobId);
-    if (JSON.stringify(existing.tradeParams) !== JSON.stringify(tradeParams)) validation.reject('Request ID was already used for a different order');
+    const comparable = value => JSON.stringify(Object.fromEntries(Object.entries(value).filter(([key]) => !['clientOrderId', 'correlationId'].includes(key)).sort(([left], [right]) => left.localeCompare(right))));
+    if (comparable(existing.tradeParams) !== comparable(tradeParams)) validation.reject('Request ID was already used for a different order');
     queueMicrotask(() => this.tick());
     return jobId;
   }
@@ -96,7 +98,7 @@ class OrderQueueService {
       const service = this.engine.services[job.targetId];
       if (!service) throw new Error('Account no longer exists');
       const params = validation.trade(job.tradeParams);
-      await this.engine.validateOrder(job.targetId, params);
+      await this.engine.validateOrder(job.targetId, params, job.id);
       placementStarted = true;
       const isMaster = this.engine.mappings.some(mapping => mapping.active !== false && mapping.masterId === job.targetId);
       const result = isMaster
@@ -107,7 +109,7 @@ class OrderQueueService {
       if (!accepted) {
         const message = result.error || response?.message || 'Broker rejected order';
         const error = new Error(message);
-        error.definitive = !uncertain(message);
+        error.definitive = response?.uncertain !== true && !uncertain(message);
         throw error;
       }
       const brokerOrderId = orderId(response);
@@ -137,7 +139,7 @@ class OrderQueueService {
         if (!books.has(job.targetId)) books.set(job.targetId, await service.getOrderBook(true));
         const order = (books.get(job.targetId) || []).find(item =>
           (job.result?.brokerOrderId && String(item.orderid) === String(job.result.brokerOrderId)) ||
-          (item.correlationId && item.correlationId === job.tradeParams.correlationId)
+          (item.correlationId && item.correlationId === (service.account.broker === 'angel_one' ? job.tradeParams.correlationId?.slice(0, 19) : job.tradeParams.correlationId))
         );
         if (!order) continue;
         const rawStatus = String(order.orderstatus || order.status || '').toLowerCase();
@@ -170,6 +172,27 @@ class OrderQueueService {
 
   async getJobStatus(jobId) {
     return parseJob(await this.database.get("SELECT * FROM jobs WHERE id = ?", [jobId]));
+  }
+
+  async retryJob(jobId, userId) {
+    const job = await this.getJobStatus(jobId);
+    const service = job && this.engine.services[job.targetId];
+    if (!job || service?.account.ownerId !== userId) validation.reject('Job not found');
+    if (!['FAILED', 'EXPIRED'].includes(job.status)) validation.reject('Only definitively failed or expired jobs can be retried');
+    if (Number(job.result?.filledQuantity) > 0) validation.reject('Partially filled orders require manual position review; automatic retry is prohibited');
+    if (job.result?.brokerOrderId) {
+      const orders = await service.getOrderBook(true);
+      const order = orders.find(item => String(item.orderid) === String(job.result.brokerOrderId));
+      if (!order || !['rejected', 'cancelled', 'canceled', 'expired', 'failed'].includes(String(order.orderstatus || order.status).toLowerCase()) || Number(order.filledshares || 0) > 0) validation.reject('Broker has not confirmed a terminal, zero-fill order');
+    }
+    if (job.metadata.trackingKey && !this.engine.mappings.some(mapping => mapping.active && mapping.childId === job.targetId && job.metadata.trackingKey.startsWith(mapping.masterId + '_'))) validation.reject('Copy mapping is no longer active');
+    await this.engine.validateOrder(job.targetId, job.tradeParams);
+    const params = { ...job.tradeParams, clientOrderId: crypto.randomBytes(24).toString('base64url').replace(/[^A-Za-z0-9]/g, '').slice(0, service.account.broker === 'motilal' ? 10 : 19) };
+    params.correlationId = params.clientOrderId;
+    const updated = await this.database.run("UPDATE jobs SET status = 'QUEUED', tradeParams = ?, result = NULL, error = NULL, completedAt = NULL, createdAt = ?, retryCount = retryCount + 1 WHERE id = ? AND status = ? AND retryCount = ?", [JSON.stringify(params), new Date().toISOString(), jobId, job.status, job.retryCount]);
+    if (!updated.changes) validation.reject('Job changed during review; refresh its status');
+    queueMicrotask(() => this.tick());
+    return this.getJobStatus(jobId);
   }
 
   async listJobs(userId) {
